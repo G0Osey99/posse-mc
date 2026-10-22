@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { parseComponent } from '../src/features/chat.js';
 import { normalizeWindowTitle, playerInventorySlotToWindow } from '../src/features/inventory.js';
-import { deltaYaw } from '../src/features/motion.js';
+import { deltaYaw, touchesBot } from '../src/features/motion.js';
 import { extractSkin, spawnTypeFilter } from '../src/features/players.js';
 import { colorName, sortScores } from '../src/features/scoreboard.js';
 import * as conv from '../src/conv.js';
@@ -58,6 +58,18 @@ describe('scoreboard', () => {
     expect(colorName(12)).toBe('red');
     expect(colorName(undefined)).toBe('reset');
     expect(colorName(-1)).toBe('reset');
+  });
+});
+
+describe('motion', () => {
+  it('notices changes to the floor and the space the bot occupies', () => {
+    const pos = { x: 10.5, y: 64, z: -3.5 };
+    expect(touchesBot(pos, 10, 63, -4)).toBe(true); // the block under its feet
+    expect(touchesBot(pos, 10, 65, -4)).toBe(true); // its head
+    expect(touchesBot(pos, 10, 62, -4)).toBe(false); // two below
+    expect(touchesBot(pos, 12, 63, -4)).toBe(false); // a neighbouring column
+    // Standing on an edge: the 0.6-wide box overlaps the next column too.
+    expect(touchesBot({ x: 10.9, y: 64, z: -3.5 }, 11, 63, -4)).toBe(true);
   });
 });
 

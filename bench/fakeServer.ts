@@ -563,6 +563,14 @@ export async function startFakeServer(options: FakeServerOptions): Promise<FakeS
       const cmd = text.replace(/^\//, '').trim().toLowerCase();
       log(`[fake ${version}] ${client.username}: /${cmd}`);
       if (cmd === 'menu') openMenu(client);
+      if (cmd === 'dropfloor') {
+        // Removes the 4 blocks under spawn (a cannon blowing out the floor): the bot must fall.
+        const x = Math.floor(spawn.x);
+        const z = Math.floor(spawn.z);
+        for (let dy = 1; dy <= 4; dy++) {
+          send(client, 'block_change', { location: { x, y: Math.floor(spawn.y) - dy, z }, type: states.air });
+        }
+      }
     };
     client.on('chat', (p: { message: string }) => {
       if (p.message.startsWith('/')) onCommand(p.message);

@@ -28,6 +28,17 @@ export interface MotionApi {
   stop(): void;
 }
 
+/**
+ * Whether a changed block touches the column the bot stands in: from the block under its feet to
+ * its head, across the blocks its 0.6-wide box overlaps.
+ */
+export function touchesBot(pos: { x: number; y: number; z: number }, x: number, y: number, z: number): boolean {
+  const half = 0.3;
+  if (x < Math.floor(pos.x - half) || x > Math.floor(pos.x + half)) return false;
+  if (z < Math.floor(pos.z - half) || z > Math.floor(pos.z + half)) return false;
+  return y >= Math.floor(pos.y) - 1 && y <= Math.floor(pos.y + 1.8);
+}
+
 export function deltaYaw(yaw1: number, yaw2: number): number {
   let d = (yaw1 - yaw2) % PI_2;
   if (d < -PI) d += PI_2;
@@ -268,6 +279,16 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
     if ('playerMotionX' in packet) v.translate(packet.playerMotionX, packet.playerMotionY, packet.playerMotionZ);
     settling = Math.max(settling, 20 * 5);
   });
+
+  // The floor (or anything around the bot) changed: simulate until it settles again, so a bot whose
+  // floor gets blown up falls instead of hovering where it was.
+  bot.world.onBlockChange = (x, y, z) => {
+    if (!active || !bot.entity?.position) return;
+    if (touchesBot(bot.entity.position, x, y, z)) {
+      settling = Math.max(settling, 20 * 10);
+      stillTicks = 0;
+    }
+  };
 
   bot.on('death', () => {
     active = false;

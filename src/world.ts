@@ -63,6 +63,8 @@ export class LazyWorld {
   private readonly columns = new Map<string, ColumnRecord>();
   /** Decoded columns, least recently used first. */
   private readonly decodedOrder = new Set<string>();
+  /** Called for every applied block change (motion uses it to notice the floor going away). */
+  onBlockChange: ((x: number, y: number, z: number) => void) | null = null;
   private centerX = 0;
   private centerZ = 0;
   private hasCenter = false;
@@ -213,6 +215,7 @@ export class LazyWorld {
   setStateId(x: number, y: number, z: number, stateId: number, needOld: boolean): number | null | undefined {
     const col = this.columns.get(key(x >> 4, z >> 4));
     if (!col) return null;
+    this.onBlockChange?.(x, y, z);
     const { minY } = this.dim();
     col.deltas.set(localIndex(x, y, z, minY), stateId);
     const column = col.decoded ?? (needOld ? this.column(col.x, col.z) : null);

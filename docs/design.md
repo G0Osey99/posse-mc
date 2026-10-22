@@ -83,7 +83,8 @@ Light packets are never decoded.
 
 No per-bot physics loop. The fleet ticker drives every bot:
 - **idle**: a position/onGround packet every 20 ticks (what the vanilla client sends while still);
-- **settling**: after spawn, a teleport or velocity on the bot, prismarine-physics runs each tick
+- **settling**: after spawn, a teleport, velocity on the bot or a block change around it (its floor
+  blown up), prismarine-physics runs each tick
   until the bot is on the ground and still, so it never floats and gets kicked for flying;
 - **moving**: while a control state is set (`setControlState`), physics runs each tick.
 

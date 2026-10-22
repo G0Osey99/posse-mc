@@ -44,6 +44,7 @@ async function verifyVersion(version: string, client: string, timeoutMs: number)
     entityMoved: false,
     windowOpen: false,
     click: false,
+    fall: false,
   };
   let bot: BenchBot | undefined;
   try {
@@ -122,6 +123,13 @@ async function verifyVersion(version: string, client: string, timeoutMs: number)
       await until(() => server.stats().menuClicks.length > 0);
       checks.click = server.stats().menuClicks.length > 0;
     }
+    // Blow out the floor under the bot: it must fall onto the block below, not hover.
+    const startY = b.entity?.position.y ?? 0;
+    b.chat('/dropfloor');
+    await until(() => (b.entity?.position.y ?? startY) <= startY - 3.9);
+    const endY = b.entity?.position.y ?? startY;
+    checks.fall = startY - endY >= 3.9 ? `fell ${(startY - endY).toFixed(1)} blocks` : false;
+
     messages = [];
     const ok = Object.values(checks).every((v) => v !== false);
     return {
