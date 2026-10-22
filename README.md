@@ -76,6 +76,7 @@ Besides minecraft-protocol's connection options (`host`, `port`, `username`, `au
 | `physics` | `true` | Simulate physics while settling or moving. |
 | `respawn` | `true` | Respawn automatically on death. |
 | `acceptResourcePacks` | `true` | Answer resource-pack requests as accepted and loaded (nothing is downloaded). |
+| `holdChatMs` | `30000` | Chat and commands sent while the bot is out of the game (before it joins, or while a 1.20.2+ server or proxy has it back in configuration) are held and sent once it's back; older ones are dropped. `0` drops them all. |
 | `decodeAll` | `false` | Decode every packet, like mineflayer (debugging). |
 
 ## API
@@ -100,8 +101,21 @@ The mineflayer-compatible slice:
 
 Posse extras:
 
+- `bot.watchSpawns(['tnt', 'falling_block'], (spawn) => …, { within: 64 })`: spawns of chosen entity
+  types (modern names in every version) without tracking the entities, even with
+  `entities: 'players'`; nothing else is decoded for them. Returns the unsubscribe function.
+- `explosion` event (`{ position, radius?, blockCount? }`) for every explosion the server reports.
+- `bot.tps`: the server's ticks per second over the last ~10 s, from its time updates (a frozen
+  server reads low even before it times out); `bot.ping()` measures the round trip now (1.20.2+;
+  older versions report the server's own figure from the tab list); `bot.latency` is the last one.
+- Transfers (1.20.5+): a `transfer` ends the connection like the game does, and
+  `bot.followTransfer()` connects a new bot there with the transfer handshake and the cookies the
+  server stored (`bot.cookies`; cookie requests are answered). `bot.transferOptions()` gives the
+  options instead, for code that creates its bots itself.
+- Kept chunks are shared by every bot in the process (`chunkStore.stats()`): bots parked in the same
+  base store each chunk once.
 - `bot.stats()`: packets decoded vs skipped (overall and per packet), bytes, kept chunks, tracked
-  entities, physics ticks.
+  entities, physics ticks, TPS and latency.
 - `bot.lastPacketAt`: when the last packet arrived (for your own stale-connection checks).
 - `bot._client`: the underlying minecraft-protocol client, as in mineflayer.
 - Window titles are normalized to JSON text components in every version, and the 1.20.3+

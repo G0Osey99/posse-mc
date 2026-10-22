@@ -2,6 +2,7 @@
 // physics runs only while the bot settles after a teleport/knockback or while a control is held;
 // otherwise the bot just reports its position the way an idle vanilla client does. Every bot shares
 // the fleet ticker. Position-packet logic follows mineflayer's physics plugin.
+import minecraftData from 'minecraft-data';
 import { Vec3 } from 'vec3';
 import type { PosseBot } from '../bot.js';
 import * as conv from '../conv.js';
@@ -39,6 +40,28 @@ export function touchesBot(pos: { x: number; y: number; z: number }, x: number, 
   return y >= Math.floor(pos.y) - 1 && y <= Math.floor(pos.y + 1.8);
 }
 
+/** Whether `entity_velocity` carries an lpVec3 (blocks/tick) rather than 1/8000-block shorts. */
+export function velocityIsLpVec3(version: string): boolean {
+  const types = (minecraftData(version)?.protocol as any)?.play?.toClient?.types;
+  const fields = types?.packet_entity_velocity?.[1] as Array<{ name: string; type: unknown }> | undefined;
+  return fields?.find((f) => f.name === 'velocity')?.type === 'lpVec3';
+}
+
+function serverboundTypes(version: string): Record<string, any> {
+  return (minecraftData(version)?.protocol as any)?.play?.toServer?.types ?? {};
+}
+
+function serverboundPacket(version: string, name: string): boolean {
+  return serverboundTypes(version)[`packet_${name}`] !== undefined;
+}
+
+/** `entity_action` action names this version knows. */
+export function actionNames(version: string): Set<string> {
+  const fields = serverboundTypes(version).packet_entity_action?.[1] as Array<{ name: string; type: any }> | undefined;
+  const mapper = fields?.find((f) => f.name === 'actionId')?.type;
+  return new Set(Array.isArray(mapper) ? Object.values(mapper[1]?.mappings ?? {}) : []);
+}
+
 export function deltaYaw(yaw1: number, yaw2: number): number {
   let d = (yaw1 - yaw2) % PI_2;
   if (d < -PI) d += PI_2;
@@ -65,6 +88,13 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
   let unsubscribe: (() => void) | null = null;
   let pendingLook: { resolve: () => void } | null = null;
   let respawnAt = 0;
+  /** Bumped when the connection's world ends, so a delayed answer from before never resubscribes. */
+  let generation = 0;
+  let lastErrorAt = 0;
+  // 1.21.9+ sends velocity as an lpVec3, which minecraft-protocol already decodes to blocks/tick.
+  const velocityInBlocks = velocityIsLpVec3(bot.version);
+  const entityActions = actionNames(bot.version);
+  const sendsInput = serverboundPacket(bot.version, 'player_input') && bot.registry.version['>=']('1.21.2');
 
   const api: MotionApi = {
     enabled: physicsAllowed,
@@ -73,10 +103,23 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
     setControlState(control, state) {
       if (controls[control] === state) return;
       controls[control] = state;
-      if (control === 'sprint') {
-        client.write('entity_action', { entityId: bot.entity.id, actionId: state ? 3 : 4, jumpBoost: 0 });
-      } else if (control === 'sneak') {
-        client.write('entity_action', { entityId: bot.entity.id, actionId: state ? 0 : 1, jumpBoost: 0 });
+      if (!bot.entity || client.state !== 'play') return;
+      // Action names, not numbers: 1.21.6 renumbered them and dropped sneaking (now player_input).
+      const action =
+        control === 'sprint' ? (state ? 'start_sprinting' : 'stop_sprinting') : control === 'sneak' ? (state ? 'start_sneaking' : 'stop_sneaking') : null;
+      if (action && entityActions.has(action)) client.write('entity_action', { entityId: bot.entity.id, actionId: action, jumpBoost: 0 });
+      if (sendsInput) {
+        client.write('player_input', {
+          inputs: {
+            forward: controls.forward,
+            backward: controls.back,
+            left: controls.left,
+            right: controls.right,
+            jump: controls.jump,
+            shift: controls.sneak,
+            sprint: controls.sprint,
+          },
+        });
       }
     },
     clearControlStates() {
@@ -87,9 +130,10 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
       bot.entity.yaw = yaw;
       bot.entity.pitch = pitch;
       if (force) {
+        // Like mineflayer: the next tick sends it, so it's never sent before the server placed us,
+        // while dead or outside the play state.
         lastSentYaw = yaw;
         lastSentPitch = pitch;
-        sendPositionLook(bot.entity.position, conv.toNotchianYaw(yaw), conv.toNotchianPitch(pitch), bot.entity.onGround);
         return Promise.resolve();
       }
       pendingLook?.resolve();
@@ -99,6 +143,9 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
       unsubscribe?.();
       unsubscribe = null;
       active = false;
+      generation++;
+      pendingLook?.resolve();
+      pendingLook = null;
     },
   };
 
@@ -141,7 +188,11 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
   };
 
   const simulate = (): void => {
-    if (bot.blockAt(bot.entity.position) === null) return; // chunk not here yet
+    if (bot.blockAt(bot.entity.position) === null) {
+      // Chunk not here yet; still counts towards giving up on settling.
+      if (settling > 0) settling--;
+      return;
+    }
     const entity = bot.entity as any;
     entity.effects ??= {};
     entity.attributes ??= {};
@@ -205,16 +256,26 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
 
   const tick = (): void => {
     if (!active || client.state !== 'play' || !bot.entity?.position) return;
-    if (needsPhysics()) simulate();
-    updatePosition(performance.now());
+    try {
+      if (needsPhysics()) simulate();
+      updatePosition(performance.now());
+    } catch (err) {
+      // Reported (at most once a minute), not swallowed by the fleet ticker.
+      const now = Date.now();
+      if (now - lastErrorAt >= 60_000) {
+        lastErrorAt = now;
+        bot.emit('error', err as Error);
+      }
+    }
   };
 
   const subscribe = (): void => {
-    if (!unsubscribe) unsubscribe = fleetTicker.subscribe(tick);
+    if (!unsubscribe && !bot.isEnded) unsubscribe = fleetTicker.subscribe(tick);
   };
 
   // ── Server-driven position ──
   client.on('position', (packet: any) => {
+    generation++; // a newer teleport supersedes a delayed answer to an older one
     const entity = bot.entity;
     entity.height = 1.8;
     const vel = entity.velocity;
@@ -249,10 +310,12 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
       respawnAt = 0;
       const p = pos.clone();
       const onGround = entity.onGround;
+      const gen = generation;
       setTimeout(() => {
+        if (gen !== generation || bot.isEnded) return;
         sendPositionLook(p, yaw, pitch, onGround);
         finish();
-      }, 1500);
+      }, 1500).unref?.();
       return;
     }
     sendPositionLook(pos, yaw, pitch, entity.onGround);
@@ -269,7 +332,8 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
   bot.decoding.setFilter('entity_velocity', (buffer, offset) => readVarInt(buffer, offset)?.value === bot.entity?.id);
   client.on('entity_velocity', (packet: any) => {
     if (!bot.entity || packet.entityId !== bot.entity.id || !api.enabled) return;
-    bot.entity.velocity.update(conv.fromNotchVelocity(packet.velocity ?? { x: packet.velocityX, y: packet.velocityY, z: packet.velocityZ }));
+    const v = packet.velocity ?? { x: packet.velocityX, y: packet.velocityY, z: packet.velocityZ };
+    bot.entity.velocity.update(velocityInBlocks ? new Vec3(v.x, v.y, v.z) : conv.fromNotchVelocity(v));
     settling = Math.max(settling, 20 * 5);
   });
   client.on('explosion', (packet: any) => {
@@ -297,10 +361,15 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
   bot.on('respawn', () => (active = false));
   client.on('login', () => {
     active = false;
+    generation++;
     bot.entity.position = new Vec3(0, 0, 0);
     bot.entity.velocity = new Vec3(0, 0, 0);
   });
-  if (sf('hasConfigurationState')) client.on('start_configuration', () => (active = false));
+  if (sf('hasConfigurationState'))
+    client.on('start_configuration', () => {
+      active = false;
+      generation++;
+    });
 
   return api;
 }

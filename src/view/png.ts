@@ -69,7 +69,8 @@ export function decodePng(input: Uint8Array): RgbaImage {
   if (!channels) throw new Error(`Bad PNG colour type ${type}`);
   const bpp = Math.max(1, (channels * depth) >> 3); // bytes per pixel for filtering
   const stride = (width * channels * depth + 7) >> 3;
-  const raw = inflateSync(Buffer.concat(idat));
+  // Bounded by what the header promises, so a small IDAT can't inflate to gigabytes.
+  const raw = inflateSync(Buffer.concat(idat), { maxOutputLength: (stride + 1) * height });
   if (raw.length < (stride + 1) * height) throw new Error('Truncated PNG');
   const px = new Uint8Array(stride * height);
   for (let y = 0; y < height; y++) {

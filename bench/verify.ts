@@ -130,6 +130,8 @@ async function verifyVersion(version: string, client: string, timeoutMs: number)
     const endY = b.entity?.position.y ?? startY;
     checks.fall = startY - endY >= 3.9 ? `fell ${(startY - endY).toFixed(1)} blocks` : false;
 
+    if (client === 'posse') await verifyPosseExtras(b as unknown as PosseExtras, server, checks, until, version);
+
     messages = [];
     const ok = Object.values(checks).every((v) => v !== false);
     return {
@@ -145,6 +147,64 @@ async function verifyVersion(version: string, client: string, timeoutMs: number)
     bot?.end?.();
     await server.close();
   }
+}
+
+interface PosseExtras extends BenchBot {
+  version: string;
+  tps: number | null;
+  latency: number | null;
+  isEnded: boolean;
+  ping(timeout?: number): Promise<number>;
+  watchSpawns(names: string[], listener: (s: { name: string }) => void): () => void;
+  followTransfer(): PosseExtras | null;
+}
+
+/** Posse's own features: spawn watching, explosions, TPS, ping, and (1.20.5+) transfer + cookies. */
+async function verifyPosseExtras(
+  b: PosseExtras,
+  server: Awaited<ReturnType<typeof startFakeServer>>,
+  checks: Record<string, boolean | string>,
+  until: (pred: () => boolean) => Promise<boolean>,
+  version: string,
+): Promise<void> {
+  let tnt = 0;
+  let explosions = 0;
+  const off = b.watchSpawns(['tnt'], () => tnt++);
+  b.on('explosion', () => explosions++);
+  b.chat('/tnt');
+  await until(() => tnt > 0 && explosions > 0);
+  off();
+  checks.watchSpawns = tnt > 0 ? `${tnt} tnt` : false;
+  checks.explosion = explosions > 0;
+
+  await until(() => b.tps !== null);
+  checks.tps = b.tps !== null ? `${b.tps}` : false;
+  checks.ping = await b.ping(3000).then(
+    (ms) => `${ms} ms${server.stats().pings > 0 ? '' : ' (tab list)'}`,
+    (err: Error) => (server.stats().pings === 0 && /latency/.test(err.message) ? 'n/a (no tab latency)' : false),
+  );
+
+  const posse = (await import('../src/decode.js')) as typeof import('../src/decode.js');
+  if (!posse.packetNames(b.version, 'play').includes('transfer')) return;
+  checks.transfer = false;
+  b.chat('/transfer');
+  await until(() => b.isEnded);
+  const next = b.followTransfer();
+  if (!next) return;
+  next.on('error', () => undefined);
+  let spawned = false;
+  next.once('spawn', () => (spawned = true));
+  await until(() => spawned);
+  next.chat('/cookie');
+  await until(() => server.stats().cookies['posse:test'] !== undefined);
+  const cookie = server.stats().cookies['posse:test'];
+  if (process.env.VERBOSE) console.log('transfer:', { ended: b.isEnded, spawned, logins: server.stats().transferLogins, cookie });
+  checks.transfer =
+    spawned && server.stats().transferLogins === 1 && cookie === 'carried'
+      ? `followed (intent 3), cookie "${cookie}"`
+      : false;
+  next.quit?.();
+  void version;
 }
 
 async function main(): Promise<void> {

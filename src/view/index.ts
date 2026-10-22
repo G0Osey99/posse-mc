@@ -1,6 +1,7 @@
 // Posse screenshots (docs/design.md → Screenshots): ViewRenderer turns a ViewScene into a PNG
 // that looks like the game. Assets come from the version's Mojang client jar (downloaded and cached
 // on first use, then kept as a compact pack file); without them a flat-colour palette is used.
+import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import minecraftData from 'minecraft-data';
@@ -30,6 +31,9 @@ export type {
 /** After a failed download the palette is used; the jar is tried again after this long. */
 const RETRY_MS = 15 * 60_000;
 const MAX_SIZE = 1920;
+const MAX_ENTITIES = 64;
+/** Region cells a render accepts (the kernel keeps ~5 bytes of scratch per cell). */
+const MAX_CELLS = 16 * 1024 * 1024;
 
 /** Version facts the kernel needs (clouds moved to y 192 and fog became a short band in 1.18). */
 export function versionTraits(version: string): { cloudHeight: number; modernFog: boolean } {
@@ -161,17 +165,13 @@ export class ViewRenderer {
     } catch {
       // no cached pack
     }
+    let pack: ViewPack;
     try {
       const jar = await ensureClientJar(assetVersionFor(version), dir, {
         fetch: this.fetchFn,
         allowDownload: this.allowDownload,
       });
-      const pack = buildPackFromJar(version, new ZipReader(jar));
-      await mkdir(join(dir, 'packs'), { recursive: true });
-      const tmp = `${file}.${process.pid}.tmp`;
-      await writeFile(tmp, serializePack(pack));
-      await rename(tmp, file);
-      return pack;
+      pack = buildPackFromJar(version, new ZipReader(jar));
     } catch {
       this.paletteAt.set(version, Date.now());
       try {
@@ -180,6 +180,15 @@ export class ViewRenderer {
         return emptyPack(version);
       }
     }
+    try {
+      await mkdir(join(dir, 'packs'), { recursive: true });
+      const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+      await writeFile(tmp, serializePack(pack));
+      await rename(tmp, file);
+    } catch {
+      // An unwritable cache costs a rebuild next time, not this pack.
+    }
+    return pack;
   }
 
   /** Waits for a free runner (renders are queued, one at a time per worker). */
@@ -203,9 +212,27 @@ export class ViewRenderer {
   async render(scene: ViewScene): Promise<ViewRenderResult> {
     const width = Math.max(16, Math.min(MAX_SIZE, Math.round(scene.width) || 640));
     const height = Math.max(16, Math.min(MAX_SIZE, Math.round(scene.height) || 360));
+    const { sizeX, sizeY, sizeZ } = scene.region;
+    if (!(sizeX > 0 && sizeY > 0 && sizeZ > 0) || sizeX * sizeY * sizeZ > MAX_CELLS)
+      throw new Error(`Scene region ${sizeX}×${sizeY}×${sizeZ} is empty or too large`);
     const pack = await this.pack(scene.version);
+    const camera = {
+      x: finite(scene.camera.x, 0),
+      y: finite(scene.camera.y, 64),
+      z: finite(scene.camera.z, 0),
+      yaw: finite(scene.camera.yaw, 0),
+      pitch: Math.max(-90, Math.min(90, finite(scene.camera.pitch, 0))),
+      fov: Math.max(10, Math.min(170, finite(scene.camera.fov ?? 70, 70))),
+    };
+    // The nearest entities only (the server controls how many there are); nametags use the same set.
+    const dist = (e: ViewScene['entities'][number]): number =>
+      (e.x - camera.x) ** 2 + (e.y - camera.y) ** 2 + (e.z - camera.z) ** 2;
+    const nearest = scene.entities
+      .filter((e) => Number.isFinite(e.x) && Number.isFinite(e.y) && Number.isFinite(e.z))
+      .sort((a, b) => dist(a) - dist(b))
+      .slice(0, MAX_ENTITIES);
     const entities: KernelEntity[] = await Promise.all(
-      scene.entities.slice(0, 64).map(async (e) => {
+      nearest.map(async (e) => {
         const skin = e.kind === 'player' ? await this.skins.get(e.skinUrl) : undefined;
         return {
           kind: e.kind,
@@ -225,14 +252,7 @@ export class ViewRenderer {
     const job: KernelJob = {
       width,
       height,
-      camera: {
-        x: finite(scene.camera.x, 0),
-        y: finite(scene.camera.y, 64),
-        z: finite(scene.camera.z, 0),
-        yaw: finite(scene.camera.yaw, 0),
-        pitch: Math.max(-90, Math.min(90, finite(scene.camera.pitch, 0))),
-        fov: Math.max(10, Math.min(170, finite(scene.camera.fov ?? 70, 70))),
-      },
+      camera,
       region: scene.region,
       entities,
       timeOfDay: scene.timeOfDay,
@@ -253,7 +273,7 @@ export class ViewRenderer {
       this.release(slot);
     }
     const frame = { width, height, data: rgba };
-    const sized = { ...scene, width, height };
+    const sized = { ...scene, width, height, camera, entities: nearest };
     if (scene.hud) drawVignette(frame, pack.hud, eyeBrightness);
     await drawNametags(frame, pack.hud, sized);
     if (scene.hud) await drawHud(frame, pack.hud, scene.hud);

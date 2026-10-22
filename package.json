@@ -1,6 +1,6 @@
 {
   "name": "posse-mc",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A fleet-optimized Minecraft bot client (1.8.9 to latest) with a mineflayer-compatible API and first-person screenshots",
   "type": "module",
   "main": "./dist/index.js",

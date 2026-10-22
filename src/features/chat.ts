@@ -2,10 +2,13 @@
 // (1.19+), `system_chat` and `profileless_chat` into `playerChat` / `systemChat` events and signs
 // outgoing messages; this formats them like mineflayer (`message` / `messagestr`).
 import type { PosseBot } from '../bot.js';
+import { packetNames } from '../decode.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- protocol packets are untyped JSON */
 
 const POSITIONS: Record<number, string> = { 0: 'chat', 1: 'system', 2: 'game_info' };
+/** Messages held at most while the bot is out of the game. */
+const MAX_HELD = 100;
 
 /** Parses a JSON chat component, or wraps plain text. 1.20.3+ components already arrive as objects. */
 export function parseComponent(value: unknown): unknown {
@@ -50,8 +53,13 @@ export function installChat(bot: PosseBot, hooks: ChatHooks): void {
         msg = new ChatMessage(parameters.content);
       }
       if (data.unsignedContent) {
+        // The server-decorated version is what the game shows (chat plugins render through it);
+        // the signed text stays available as `signed`, the decorated one also as `unsigned`.
         try {
-          msg.unsigned = ChatMessage.fromNetwork(index, { ...parameters, content: parseComponent(data.unsignedContent) });
+          const unsigned = ChatMessage.fromNetwork(index, { ...parameters, content: parseComponent(data.unsignedContent) });
+          unsigned.signed = msg;
+          unsigned.unsigned = unsigned;
+          msg = unsigned;
         } catch {
           // keep the signed text
         }
@@ -75,17 +83,20 @@ export function installChat(bot: PosseBot, hooks: ChatHooks): void {
   client.on('action_bar', (packet: any) => bot.emit('actionBar', fromNotch(packet.text)));
 
   // ── Titles ──
-  const titleText = (text: unknown): string => {
-    const value = text && typeof text === 'object' && 'value' in (text as object) ? (text as { value: unknown }).value : text;
-    return fromNotch(parseComponent(value)).toString();
-  };
-  if (sf('titleUsesLegacyPackets')) {
+  // A JSON string, or (1.20.3+) an NBT component, which fromNotch simplifies as a whole: unwrapping
+  // only the outer tag left typed NBT inside (`extra` as {type:'list'…}) and lost styled parts.
+  const titleText = (text: unknown): string => fromNotch(text).toString();
+  // By packet, not feature flag: minecraft-data marks 1.17.0 as legacy, but it has set_title_*.
+  if (!packetNames(bot.version, 'play').includes('set_title_text')) {
+    // 1.11 inserted "action bar" as action 2: title, subtitle, [action bar], times, clear, reset.
+    const actionBar = bot.registry.version['>=']('1.11');
     client.on('title', (packet: any) => {
-      if (packet.action === 0) bot.emit('title', titleText(packet.text), 'title');
-      else if (packet.action === 1) bot.emit('title', titleText(packet.text), 'subtitle');
-      else if (packet.action === 2) bot.emit('title_times', packet.fadeIn, packet.stay, packet.fadeOut);
-      else if (packet.action === 3 && packet.fadeIn !== undefined) bot.emit('title_times', packet.fadeIn, packet.stay, packet.fadeOut);
-      else if (packet.action === 3 || packet.action === 4) bot.emit('title_clear');
+      const action = actionBar || packet.action < 2 ? packet.action : packet.action + 1;
+      if (action === 0) bot.emit('title', titleText(packet.text), 'title');
+      else if (action === 1) bot.emit('title', titleText(packet.text), 'subtitle');
+      else if (action === 2) bot.emit('actionBar', fromNotch(packet.text));
+      else if (action === 3) bot.emit('title_times', packet.fadeIn, packet.stay, packet.fadeOut);
+      else if (action === 4 || action === 5) bot.emit('title_clear');
     });
   } else {
     client.on('set_title_text', (packet: any) => bot.emit('title', titleText(packet.text), 'title'));
@@ -140,9 +151,25 @@ export function installChat(bot: PosseBot, hooks: ChatHooks): void {
       });
     };
   }
+  // Outside the play state (before joining, or while a 1.20.2+ server or proxy has the bot back in
+  // configuration) nothing can be sent: hold messages and send them once the bot is back in the game.
+  const holdMs = bot.options.holdChatMs ?? 30_000;
+  const held: Array<{ message: string; at: number }> = [];
+  const flush = (): void => {
+    const now = Date.now();
+    for (const { message, at } of held.splice(0)) if (now - at <= holdMs) send(message);
+  };
+  // After the other login handlers (minecraft-protocol starts the chat session on login).
+  client.on('login', () => setImmediate(flush));
+  client.on('end', () => (held.length = 0));
   hooks.setSend((message) => {
-    if (client.state !== 'play') return;
-    send(message);
+    if (client.state === 'play' && held.length === 0) {
+      send(message);
+      return;
+    }
+    if (holdMs <= 0 || client.ended) return;
+    held.push({ message, at: Date.now() });
+    if (held.length > MAX_HELD) held.shift();
   });
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */

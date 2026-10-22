@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import zlib from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 import {
+  FrameError,
   Framer,
   decompressFrame,
   entityIdFilter,
@@ -176,5 +177,20 @@ describe('Framer and decompressFrame', () => {
 
   it('passes uncompressed bodies through', () => {
     expect([...decompressFrame(Buffer.from([0, 5, 6]))]).toEqual([5, 6]);
+  });
+
+  it('rejects a negative or oversized length instead of looping', () => {
+    const framer = new Framer(() => undefined);
+    expect(() => framer.push(Buffer.from([0xfb, 0xff, 0xff, 0xff, 0x0f]))).toThrow(FrameError);
+    expect(() => new Framer(() => undefined).push(Buffer.from([0x80, 0x80, 0x80, 0x01]))).toThrow(FrameError);
+    // A 3-byte prefix split across reads is still just incomplete.
+    expect(() => new Framer(() => undefined).push(Buffer.from([0xff, 0xff]))).not.toThrow();
+  });
+
+  it('never inflates past the declared length', () => {
+    const body = zlib.deflateSync(Buffer.alloc(100_000));
+    expect(() => decompressFrame(Buffer.concat([Buffer.from(varint(10)), body]))).toThrow();
+    const ok = decompressFrame(Buffer.concat([Buffer.from(varint(100_000)), body]));
+    expect(ok.length).toBe(100_000);
   });
 });

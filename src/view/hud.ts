@@ -41,13 +41,14 @@ export function blit(
   const tr = opts.tint !== undefined ? ((opts.tint >> 16) & 255) / 255 : 1;
   const tg = opts.tint !== undefined ? ((opts.tint >> 8) & 255) / 255 : 1;
   const tb = opts.tint !== undefined ? (opts.tint & 255) / 255 : 1;
-  for (let j = 0; j < H; j++) {
+  // Only the part on screen is walked (a huge scale must not cost its full size).
+  const j1 = Math.min(H, frame.height - y0);
+  const i1 = Math.min(W, frame.width - x0);
+  for (let j = Math.max(0, -y0); j < j1; j++) {
     const fy = y0 + j;
-    if (fy < 0 || fy >= frame.height) continue;
     const iy = sy0 + Math.min(sh - 1, Math.floor(j / scale));
-    for (let i = 0; i < W; i++) {
+    for (let i = Math.max(0, -x0); i < i1; i++) {
       const fx = x0 + i;
-      if (fx < 0 || fx >= frame.width) continue;
       const ix = sx0 + Math.min(sw - 1, Math.floor(i / scale));
       const s = (iy * img.width + ix) * 4;
       const a = (img.data[s + 3] / 255) * op;
@@ -245,13 +246,17 @@ export async function drawNametags(
     }))
     .filter(
       (t): t is { e: (typeof t)['e']; p: NonNullable<(typeof t)['p']> } =>
-        t.p !== null && t.p.depth < 64,
+        t.p !== null && t.p.depth > 0.3 && t.p.depth < 64,
     )
     .sort((a, b) => b.p.depth - a.p.depth);
   const th = Math.tan(((scene.camera.fov ?? 70) * Math.PI) / 360);
   for (const { e, p } of tags) {
     // The game's size (0.025 blocks per font pixel), but never so small that the name is unreadable.
-    const scale = Math.max(0.5, (0.025 / (p.depth * th)) * (frame.height / 2));
+    // ...nor larger than a sixth of the frame.
+    const scale = Math.min(
+      frame.height / 48,
+      Math.max(0.5, (0.025 / (p.depth * th)) * (frame.height / 2)),
+    );
     const label = e.label!.slice(0, 32);
     const w = textWidth(hud, label) * scale;
     const x = p.x - w / 2;

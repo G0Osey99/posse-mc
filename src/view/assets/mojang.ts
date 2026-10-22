@@ -1,7 +1,7 @@
 // Downloads a version's client jar from Mojang's piston servers (version manifest → version json
 // → downloads.client), checks its sha1 and caches it under `<cacheDir>/jars/`. Only the user's own
 // machine talks to Mojang; no Mojang asset is shipped with Posse.
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -82,10 +82,14 @@ async function loadClientJar(
   if (!client) throw new Error(`Version ${version} has no client download`);
   const jar = await fetchBytes(fetchFn, client.url, 10 * 60_000);
   if (sha1(jar) !== client.sha1) throw new Error(`Client jar ${version}: sha1 mismatch`);
-  await mkdir(dir, { recursive: true });
-  const tmp = join(dir, `${version}.jar.${process.pid}.tmp`);
-  await writeFile(tmp, jar);
-  await rename(tmp, join(dir, `${version}.jar`));
-  await writeFile(indexFile, client.sha1);
+  try {
+    await mkdir(dir, { recursive: true });
+    const tmp = join(dir, `${version}.jar.${process.pid}.${randomUUID()}.tmp`);
+    await writeFile(tmp, jar);
+    await rename(tmp, join(dir, `${version}.jar`));
+    await writeFile(indexFile, client.sha1);
+  } catch {
+    // An unwritable cache costs a download next time, not this verified jar.
+  }
   return jar;
 }

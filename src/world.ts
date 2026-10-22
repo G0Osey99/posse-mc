@@ -3,14 +3,15 @@
 import zlib from 'node:zlib';
 import { Vec3 } from 'vec3';
 import type { Block } from 'prismarine-block';
+import { chunkStore, type ChunkStore, type SharedPayload } from './chunkStore.js';
 import type { VersionKit } from './registry.js';
 
 /** One `Chunk.load` call's arguments, kept until the column is decoded. */
 export interface ChunkLoad {
-  /** Raw section data as received (stored deflated, see `packed`). */
+  /** Raw section data as received (small payloads are kept as is; larger ones go to `shared`). */
   data: Buffer;
-  /** True once `data` holds the deflated payload. */
-  packed?: boolean;
+  /** The payload in the fleet chunk store, once stored there (`data` is then empty). */
+  shared?: SharedPayload;
   bitMap?: number;
   skyLightSent?: boolean;
   groundUp?: boolean;
@@ -59,6 +60,11 @@ export function chunkDistance(ax: number, az: number, bx: number, bz: number): n
   return Math.max(Math.abs(ax - bx), Math.abs(az - bz));
 }
 
+/** Chunks kept beyond the radius (see `wants`). */
+export const KEEP_MARGIN = 2;
+
+const EMPTY = Buffer.alloc(0);
+
 export class LazyWorld {
   private readonly columns = new Map<string, ColumnRecord>();
   /** Decoded columns, least recently used first. */
@@ -76,6 +82,8 @@ export class LazyWorld {
     public radius: number,
     /** Decoded columns kept at most (the rest stay raw); physics needs the few around the bot. */
     private readonly maxDecoded = 16,
+    /** Where payloads are kept (the process-wide store, shared by every bot). */
+    private readonly store: ChunkStore = chunkStore,
   ) {}
 
   stats(): WorldStats {
@@ -85,28 +93,36 @@ export class LazyWorld {
   }
 
   clear(): void {
+    for (const col of this.columns.values()) this.release(col);
     this.columns.clear();
     this.decodedOrder.clear();
+    // A new world: the old centre would drop chunks that arrive before the first position.
+    this.hasCenter = false;
   }
 
-  /** Moves the keep-radius to the bot's chunk; drops columns beyond radius + 1. */
+  /** Moves the keep-radius to the bot's chunk; drops columns beyond radius + KEEP_MARGIN. */
   setCenter(chunkX: number, chunkZ: number): void {
     if (this.hasCenter && chunkX === this.centerX && chunkZ === this.centerZ) return;
     this.centerX = chunkX;
     this.centerZ = chunkZ;
     this.hasCenter = true;
     for (const [k, col] of this.columns) {
-      if (chunkDistance(col.x, col.z, chunkX, chunkZ) > this.radius + 1) {
+      if (chunkDistance(col.x, col.z, chunkX, chunkZ) > this.radius + KEEP_MARGIN) {
+        this.release(col);
         this.columns.delete(k);
         this.decodedOrder.delete(k);
       }
     }
   }
 
-  /** Whether a column at this position would be kept (kept ones are dropped beyond radius + 1). */
+  /**
+   * Whether a column at this position is kept. Columns up to KEEP_MARGIN beyond the radius are kept
+   * too (stored, not decoded): the server sends a chunk only once while it's in view, so dropping
+   * them would leave holes inside the radius as soon as the bot moves a chunk or two.
+   */
   wants(chunkX: number, chunkZ: number): boolean {
     if (this.radius <= 0) return false;
-    return !this.hasCenter || chunkDistance(chunkX, chunkZ, this.centerX, this.centerZ) <= this.radius;
+    return !this.hasCenter || chunkDistance(chunkX, chunkZ, this.centerX, this.centerZ) <= this.radius + KEEP_MARGIN;
   }
 
   hasColumn(chunkX: number, chunkZ: number): boolean {
@@ -125,6 +141,7 @@ export class LazyWorld {
         this.unload(chunkX, chunkZ);
         return false;
       }
+      if (col) this.release(col);
       col = { x: chunkX, z: chunkZ, loads: [], deltas: new Map(), decoded: null, bytes: 0 };
       this.columns.set(k, col);
       this.decodedOrder.delete(k);
@@ -137,21 +154,29 @@ export class LazyWorld {
       }
     }
     if (col.decoded) this.loadInto(col.decoded, load);
-    // Chunk sections compress well (palettes, runs of air): ~5–10× less memory per kept column.
-    const packed = load.data.length > 512 ? { ...load, data: zlib.deflateSync(load.data, { level: 1 }), packed: true } : load;
-    col.loads.push(packed);
-    col.bytes += packed.data.length;
+    // Larger payloads go to the fleet store: deflated, and shared with bots that got the same bytes.
+    const kept = load.data.length > 512 ? { ...load, data: EMPTY, shared: this.store.acquire(this.kit.version, load.data) } : load;
+    col.loads.push(kept);
+    col.bytes += kept.shared ? kept.shared.data.length : kept.data.length;
     return true;
   }
 
   unload(chunkX: number, chunkZ: number): void {
     const k = key(chunkX, chunkZ);
+    const col = this.columns.get(k);
+    if (col) this.release(col);
     this.columns.delete(k);
     this.decodedOrder.delete(k);
   }
 
+  /** Gives a column's payloads back to the fleet store. */
+  private release(col: ColumnRecord): void {
+    for (const load of col.loads) if (load.shared) this.store.release(load.shared);
+    col.loads = [];
+  }
+
   private loadInto(column: Column, load: ChunkLoad): void {
-    const data = load.packed ? zlib.inflateSync(load.data) : load.data;
+    const data = load.shared ? zlib.inflateSync(load.shared.data) : load.data;
     column.load(data, load.bitMap, load.skyLightSent, load.groundUp);
     if (load.biomes !== undefined && typeof column.loadBiomes === 'function') column.loadBiomes(load.biomes);
   }

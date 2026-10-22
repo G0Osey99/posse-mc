@@ -23,9 +23,11 @@ const KINDS: Record<string, SceneEntity['kind']> = { player: 'player', mob: 'mob
 export function buildScene(bot: PosseBot, options: SceneOptions = {}): ViewScene | null {
   const self = bot.entity;
   if (!self?.position || !bot.world) return null;
-  const radius = options.radius ?? 64;
-  const below = options.below ?? 40;
-  const above = options.above ?? 48;
+  const clamp = (v: number | undefined, d: number, max: number): number =>
+    Math.max(1, Math.min(max, Math.round(Number.isFinite(v) ? v! : d)));
+  const radius = clamp(options.radius, 64, 160);
+  const below = clamp(options.below, 40, 160);
+  const above = clamp(options.above, 48, 160);
   const eye = { x: self.position.x, y: self.position.y + 1.62, z: self.position.z };
 
   const originX = Math.floor(eye.x) - radius;

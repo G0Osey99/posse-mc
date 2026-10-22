@@ -2,7 +2,8 @@
 // tracked kinds are created; movement packets for anything else are dropped before decoding.
 import type { PosseBot } from '../bot.js';
 import * as conv from '../conv.js';
-import { entityIdFilter, readVarInt } from '../decode.js';
+import { entityIdFilter } from '../decode.js';
+import { spawnTypeFilter, type SpawnWatch } from './spawns.js';
 import type { Entity, EntityTracking, Player } from '../types.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- protocol packets are untyped JSON */
@@ -27,17 +28,7 @@ export function extractSkin(properties: Array<{ name: string; value: string }> |
   }
 }
 
-/** Packet filter for `spawn_entity`: entity id, 16-byte UUID, then the type varint. */
-export function spawnTypeFilter(accept: (type: number) => boolean): (buffer: Buffer, offset: number) => boolean {
-  return (buffer, offset) => {
-    const id = readVarInt(buffer, offset);
-    if (!id) return true;
-    const type = readVarInt(buffer, id.end + 16);
-    return !type || accept(type.value);
-  };
-}
-
-export function installPlayers(bot: PosseBot, tracking: EntityTracking): void {
+export function installPlayers(bot: PosseBot, tracking: EntityTracking, spawns: SpawnWatch): void {
   const client = bot._client as any;
   const sf = bot.supportFeature;
   const { Entity } = bot.kit;
@@ -55,8 +46,13 @@ export function installPlayers(bot: PosseBot, tracking: EntityTracking): void {
   for (const name of ['rel_entity_move', 'entity_move_look', 'entity_look', 'entity_teleport', 'sync_entity_position', 'entity_head_rotation']) {
     bot.decoding.setFilter(name, moveFilter);
   }
-  if (tracking !== 'all' && playerTypeId !== undefined) {
-    bot.decoding.setFilter('spawn_entity', spawnTypeFilter((type) => type === playerTypeId));
+  // spawn_entity carries players from 1.20.2; watched types (spawns.ts) pass too.
+  const playersInSpawnEntity = tracking !== 'none' && bot.registry.version['>=']('1.20.2');
+  if (tracking !== 'all') {
+    bot.decoding.setFilter(
+      'spawn_entity',
+      spawnTypeFilter((type) => (playersInSpawnEntity && type === playerTypeId) || spawns.wantsObject(type), spawns.layout),
+    );
   }
 
   const nameOf = (username: string): any => new ChatMessage({ text: '', extra: [{ text: username }] });
@@ -73,6 +69,18 @@ export function installPlayers(bot: PosseBot, tracking: EntityTracking): void {
     else entity.position.set(pos.x, pos.y, pos.z);
     if (pos.yaw !== undefined) entity.yaw = conv.fromNotchianYawByte(pos.yaw);
     if (pos.pitch !== undefined) entity.pitch = conv.fromNotchianPitchByte(pos.pitch);
+  };
+  // 1.21.2+ entity_teleport: degrees as floats, and each coordinate/angle may be relative.
+  const teleportInDegrees = bot.registry.version['>=']('1.21.2');
+  const teleport = (entity: Entity, packet: any): void => {
+    if (!teleportInDegrees) return setPos(entity, packet);
+    const rel = (name: string): boolean => Boolean(packet.flags?.[name]);
+    const p = entity.position;
+    p.set(rel('x') ? p.x + packet.x : packet.x, rel('y') ? p.y + packet.y : packet.y, rel('z') ? p.z + packet.z : packet.z);
+    const yaw = (rel('yaw') ? conv.toNotchianYaw(entity.yaw) : 0) + packet.yaw;
+    const pitch = (rel('pitch') ? conv.toNotchianPitch(entity.pitch) : 0) + packet.pitch;
+    entity.yaw = conv.fromNotchianYaw(yaw);
+    entity.pitch = conv.fromNotchianPitch(pitch);
   };
 
   const linkPlayerEntity = (player: Player): void => {
@@ -131,6 +139,21 @@ export function installPlayers(bot: PosseBot, tracking: EntityTracking): void {
     (self as any).eyeHeight = PLAYER_EYE_HEIGHT;
     bot.entity = self;
     bot.entities[packet.entityId] = self;
+    dimension = bot.game.dimension;
+  });
+  // A new world (a dimension change, or a proxy's server switch, which hops dimensions): the game
+  // drops every other entity, and the old server never sends their removal.
+  let dimension = '';
+  client.on('respawn', () => {
+    if (bot.game.dimension === dimension) return;
+    dimension = bot.game.dimension;
+    const gone = bot.listenerCount('entityGone') > 0;
+    for (const [id, entity] of Object.entries(bot.entities)) {
+      if (entity === bot.entity) continue;
+      delete bot.entities[Number(id)];
+      if (gone) bot.emit('entityGone', entity);
+    }
+    for (const player of Object.values(bot.players)) player.entity = null;
   });
   bot.on('spawn', () => bot.emit('entitySpawn', bot.entity));
 
@@ -144,14 +167,23 @@ export function installPlayers(bot: PosseBot, tracking: EntityTracking): void {
       if (!(packet.playerUUID in bot.uuidToUsername)) return;
       bot.emit('entitySpawn', addPlayerEntity(packet.entityId, packet.playerUUID, packet));
     });
-    // ≤1.20.1: objects/vehicles (all mode only); 1.20.2+: every entity including players.
-    if (tracking === 'all' || bot.registry.version['>=']('1.20.2')) {
+  }
+  // ≤1.20.1: objects/vehicles; 1.20.2+: every entity including players. Always listened to (the
+  // filter above keeps it to what's tracked or watched).
+  client.on('spawn_entity', (packet: any) => {
+    const name = spawns.objectName(packet.type);
+    if (name) spawns.report(name, packet, packet.objectUUID);
+  });
+  if (tracking !== 'none') {
+    if (tracking === 'all' || playersInSpawnEntity) {
       client.on('spawn_entity', (packet: any) => {
-        const isPlayer = packet.type === playerTypeId && bot.registry.version['>=']('1.20.2');
+        const isPlayer = packet.type === playerTypeId && playersInSpawnEntity;
         if (!isPlayer && tracking !== 'all') return;
         const entity = isPlayer
           ? addPlayerEntity(packet.entityId, packet.objectUUID, packet)
           : addOtherEntity(packet.entityId, packet.objectUUID, packet.type, packet);
+        // Before 1.14 the type is an object id, not a registry id.
+        if (!isPlayer && spawns.layout !== 'varint') entity.name = spawns.objectName(packet.type) ?? entity.name;
         bot.emit('entitySpawn', entity);
       });
     }
@@ -165,9 +197,23 @@ export function installPlayers(bot: PosseBot, tracking: EntityTracking): void {
           entity.height = mob.height;
           entity.width = mob.width;
         }
+        spawns.report(entity.name ?? 'unknown', packet, packet.entityUUID);
         bot.emit('entitySpawn', entity);
       });
     }
+  }
+  // Watched mobs (≤1.18 they come in spawn_entity_living): listened to only while watched.
+  if (tracking !== 'all') {
+    const onLiving = (packet: any): void => {
+      const name = registry.mobs?.[packet.type]?.name ?? entityData[packet.type]?.name;
+      if (name) spawns.report(name, packet, packet.entityUUID);
+    };
+    let living = false;
+    spawns.onChange = () => {
+      if (spawns.watchesMobs && !living) client.on('spawn_entity_living', onLiving);
+      else if (!spawns.watchesMobs && living) client.removeListener('spawn_entity_living', onLiving);
+      living = spawns.watchesMobs;
+    };
   }
 
   const destroy = (id: number): void => {
@@ -210,7 +256,7 @@ export function installPlayers(bot: PosseBot, tracking: EntityTracking): void {
   client.on('entity_teleport', (packet: any) => {
     const entity = bot.entities[packet.entityId];
     if (!entity) return;
-    setPos(entity, packet);
+    teleport(entity, packet);
     moved(entity);
   });
   client.on('sync_entity_position', (packet: any) => {

@@ -38,21 +38,23 @@ export function readVarInt(buffer: Buffer, offset: number): { value: number; end
 
 type ProtocolTypes = Record<string, unknown>;
 
-function protocolTypes(version: string, state: string): ProtocolTypes | null {
+type Direction = 'toClient' | 'toServer';
+
+function protocolTypes(version: string, state: string, direction: Direction = 'toClient'): ProtocolTypes | null {
   const data = minecraftData(version);
-  const protocol = data?.protocol as unknown as Record<string, { toClient?: { types?: ProtocolTypes } }> | undefined;
-  return protocol?.[state]?.toClient?.types ?? null;
+  const protocol = data?.protocol as unknown as Record<string, Record<Direction, { types?: ProtocolTypes } | undefined>> | undefined;
+  return protocol?.[state]?.[direction]?.types ?? null;
 }
 
 const nameCache = new Map<string, string[]>();
 
-/** Clientbound packet names by id for a version and protocol state. */
-export function packetNames(version: string, state: string): string[] {
-  const key = `${version};${state}`;
+/** Packet names by id for a version and protocol state (clientbound unless asked). */
+export function packetNames(version: string, state: string, direction: Direction = 'toClient'): string[] {
+  const key = `${version};${state};${direction}`;
   const cached = nameCache.get(key);
   if (cached) return cached;
   const names: string[] = [];
-  const packet = protocolTypes(version, state)?.packet as [string, Array<{ name: string; type: unknown }>] | undefined;
+  const packet = protocolTypes(version, state, direction)?.packet as [string, Array<{ name: string; type: unknown }>] | undefined;
   const field = packet?.[1]?.find((f) => f.name === 'name');
   const mapper = Array.isArray(field?.type) ? (field.type[1] as { mappings?: Record<string, string> }) : undefined;
   for (const [id, name] of Object.entries(mapper?.mappings ?? {})) names[Number(id)] = name;
@@ -95,9 +97,17 @@ export function hasConsumers(client: Pick<Client, 'listenerCount'>, name: string
   );
 }
 
+/** The protocol's frame limit: a length prefix is at most 3 bytes (2^21 - 1). */
+export const MAX_FRAME = (1 << 21) - 1;
+/** The vanilla client's limit on a decompressed packet. */
+export const MAX_PACKET = 1 << 23;
+
+export class FrameError extends Error {}
+
 /**
  * Splits a byte stream into length-prefixed frames without throwing on partial data. Feed it
- * socket chunks; it calls `onFrame` for every complete frame, in order.
+ * socket chunks; it calls `onFrame` for every complete frame, in order. A corrupt length (negative,
+ * over 2^21, or a prefix longer than 3 bytes) throws a FrameError: the stream can't be resynced.
  */
 export class Framer {
   private pending: Buffer | null = null;
@@ -110,7 +120,12 @@ export class Framer {
     let offset = 0;
     while (offset < buffer.length) {
       const length = readVarInt(buffer, offset);
-      if (!length || length.end + length.value > buffer.length) break;
+      if (!length) {
+        if (buffer.length - offset >= 3) throw new FrameError('Bad frame length prefix');
+        break;
+      }
+      if (length.value < 0 || length.value > MAX_FRAME) throw new FrameError(`Bad frame length ${length.value}`);
+      if (length.end + length.value > buffer.length) break;
       this.onFrame(buffer.subarray(length.end, length.end + length.value));
       offset = length.end + length.value;
       // A frame handler may have replaced the pipeline (e.g. compression turned on): keep going.
@@ -129,7 +144,9 @@ export function decompressFrame(frame: Buffer): Buffer {
   if (!length) throw new Error('Truncated compressed frame');
   const body = frame.subarray(length.end);
   if (length.value === 0) return body;
-  return zlib.inflateSync(body, { finishFlush: zlib.constants.Z_SYNC_FLUSH });
+  if (length.value < 0 || length.value > MAX_PACKET) throw new Error(`Bad uncompressed length ${length.value}`);
+  // Never inflate past the declared size (a small frame must not inflate to gigabytes).
+  return zlib.inflateSync(body, { finishFlush: zlib.constants.Z_SYNC_FLUSH, maxOutputLength: length.value });
 }
 
 interface ParsedPacket {
@@ -297,13 +314,19 @@ export function installDemandDecoding(client: Client): DemandDecoding {
   if (splitter) {
     const framer = new Framer(onFrame);
     // Nothing is pushed downstream any more: the decompressor/deserializer streams stay idle.
+    let broken = false;
     splitter._transform = (chunk, _enc, cb) => {
+      if (broken) return cb();
       try {
         framer.push(chunk);
-        cb();
       } catch (err) {
-        cb(err as Error);
+        // A corrupt stream can't be resynced: report it and close (minecraft-protocol's splitter
+        // would only emit an error and leave the connection hanging until the keepalive timeout).
+        broken = true;
+        client.emit('error', err as Error);
+        client.end(err instanceof FrameError ? 'Corrupt stream' : 'Read error');
       }
+      cb();
     };
   }
   return control;

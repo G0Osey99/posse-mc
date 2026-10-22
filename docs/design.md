@@ -74,10 +74,16 @@ last-packet time is `bot.lastPacketAt`.
 ### World
 
 `map_chunk` payloads are kept raw and deflated (only within `worldRadius` chunks of the bot,
-default 4), together with the block changes since. A column is decoded with prismarine-chunk only
+default 4, plus a 2-chunk margin so a short walk doesn't leave holes the server won't refill),
+together with the block changes since. A column is decoded with prismarine-chunk only
 when something asks (`blockAt`, physics, a screenshot, `blockUpdate` listeners) and the decoded
 column is cached until it is evicted (LRU of 16); screenshots decode columns for the copy only. `blockUpdate` is only computed when it has listeners.
 Light packets are never decoded.
+
+Kept payloads live in a process-wide chunk store (`chunkStore.ts`), keyed by version and a SHA-1 of
+the payload, with a reference count: bots parked in the same base receive byte-identical chunks, so
+each is hashed (cheaper than deflating) and stored once. Block changes stay per bot. A bot's
+references are released when its columns are evicted, unloaded or cleared, and when it ends.
 
 ### Motion
 
@@ -101,10 +107,25 @@ equality. Shared per-version objects (registry, prismarine-chunk/item/windows/ch
 cached in `registry.ts`. Covered differences include: chat (`chat` ≤1.18, signed `player_chat`
 1.19–1.19.2, `player_chat`/`system_chat`/`profileless_chat` 1.19.3+, NBT components 1.20.3+),
 titles (`title` ≤1.16, `set_title_*` 1.17+), windows (action numbers + `transaction` ≤1.16, state
-ids 1.17+, hashed slots 1.21.5+), tab list (`player_info` actions ≤1.19.2, bitset + `player_remove`
+ids 1.17+, hashed slots 1.21.5+, sent without component hashes so the server resyncs changed slots), tab list (`player_info` actions ≤1.19.2, bitset + `player_remove`
 1.19.3+), tab complete (≤1.12 vs transaction ids 1.13+), positions (teleport ids 1.9+, 1.21.2
 format), chunk batches (1.20.2+ must be acknowledged), configuration re-entry (1.20.2+), resource
 packs (uuid 1.20.3+), `player_loaded` (1.21.4+).
+
+### Watching, server health, transfers
+
+- `watchSpawns(names, listener)` reports spawns of chosen types without tracking them: the
+  `spawn_entity` peek filter lets through what's tracked or watched (type id read as a varint from
+  1.14, a byte before, without the UUID on 1.8), so a players-only bot can still count primed TNT.
+  Before 1.14 objects have their own ids (`spawns.ts` → `LEGACY_OBJECT_IDS`). Watched mobs (≤1.18
+  `spawn_entity_living`) are listened to only while watched.
+- TPS comes from `update_time` (world age, once a second): age gained over wall time across the
+  last ~12 samples, measured to now when updates stop. `ping()` uses `ping_request` (1.20.2+).
+- Chat sent outside the play state is held (`holdChatMs`) and flushed after the next `login`.
+- Writes are checked against the current state's serverbound packets (a play packet written in the
+  configuration state would serialize as another packet and get the bot kicked).
+- Transfers (1.20.5+): cookies are stored and answered (minecraft-protocol answers neither), the
+  connection ends on `transfer`, and a follow-up connection sends handshake intent 3.
 
 ## Screenshots (`posse-mc/view`)
 

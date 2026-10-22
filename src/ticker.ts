@@ -4,6 +4,11 @@
 export const TICK_MS = 50;
 /** Ticks run back-to-back after a stall before the clock is resynced (like mineflayer's catch-up). */
 const MAX_CATCHUP_TICKS = 4;
+/**
+ * A tick due within this many ms runs now: the timer fires on a whole-ms clock, so without slack a
+ * callback at 49.8 ms runs nothing and the next one runs two ticks back to back.
+ */
+const SLACK_MS = 2;
 
 export type TickHandler = () => void;
 
@@ -46,7 +51,7 @@ export class FleetTicker {
   run(): void {
     const start = this.now();
     let ran = 0;
-    while (this.next <= start && ran < MAX_CATCHUP_TICKS) {
+    while (this.next <= start + SLACK_MS && ran < MAX_CATCHUP_TICKS) {
       this.tickOnce();
       this.next += TICK_MS;
       ran++;
@@ -61,7 +66,7 @@ export class FleetTicker {
       try {
         handler();
       } catch {
-        // A bot's tick failure must not stop the others; the bot reports its own errors.
+        // A bot's tick failure must not stop the others; handlers report their own errors.
       }
     }
   }

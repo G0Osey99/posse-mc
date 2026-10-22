@@ -54,18 +54,28 @@ export class PacketFiller {
   private readonly playTypes: Record<string, unknown>;
   private readonly types: Record<string, unknown>;
 
+  /** Packet name → its type name (shared packets are `packet_common_*` from 1.20.5). */
+  private readonly typeOf = new Map<string, string>();
+
   constructor(protocol: Protocol) {
     this.playTypes = protocol.play.toClient.types;
     this.types = protocol.types;
+    const packet = this.playTypes.packet as [string, Array<{ name: string; type: [string, { fields?: Record<string, string> }] }>] | undefined;
+    const fields = packet?.[1]?.find((f) => f.name === 'params')?.type?.[1]?.fields ?? {};
+    for (const [name, type] of Object.entries(fields)) this.typeOf.set(name, type);
+  }
+
+  private spec(name: string): Spec | undefined {
+    return (this.playTypes[this.typeOf.get(name) ?? `packet_${name}`] ?? this.types[this.typeOf.get(name) ?? '']) as Spec | undefined;
   }
 
   has(name: string): boolean {
-    return `packet_${name}` in this.playTypes;
+    return this.spec(name) !== undefined;
   }
 
   /** Field names of a packet (top-level), or null when the version has no such packet. */
   fields(name: string): string[] | null {
-    const spec = this.playTypes[`packet_${name}`] as Spec | undefined;
+    const spec = this.spec(name);
     if (!spec) return null;
     const resolved = this.resolve(spec);
     if (!Array.isArray(resolved) || resolved[0] !== 'container') return [];
@@ -74,7 +84,7 @@ export class PacketFiller {
 
   /** The resolved type of a packet's top-level field (undefined when absent). */
   fieldType(name: string, field: string): Spec | undefined {
-    const spec = this.playTypes[`packet_${name}`] as Spec | undefined;
+    const spec = this.spec(name);
     if (!spec) return undefined;
     const resolved = this.resolve(spec);
     if (!Array.isArray(resolved) || resolved[0] !== 'container') return undefined;
@@ -89,7 +99,7 @@ export class PacketFiller {
 
   /** Fills a play-state clientbound packet. Throws when the version has no such packet. */
   packet(name: string, params: Obj = {}): Obj {
-    const spec = this.playTypes[`packet_${name}`] as Spec | undefined;
+    const spec = this.spec(name);
     if (!spec) throw new Error(`No clientbound packet ${name} in this version`);
     return this.fill(spec, params, []) as Obj;
   }

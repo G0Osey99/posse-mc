@@ -170,7 +170,7 @@ export function installScoreboard(bot: PosseBot): void {
   };
   const update = (team: Team, packet: any): void => {
     team.name = parse(packet.name);
-    team.color = colorName(packet.formatting);
+    team.color = colorName(packet.formatting ?? packet.color); // `color` before 1.13
     team.prefix = parse(packet.prefix);
     team.suffix = parse(packet.suffix);
   };

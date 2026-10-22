@@ -1,7 +1,7 @@
 // Player skins for the screenshot: fetched from Mojang's texture server (the URL comes from the tab
 // list's textures property, which the game server controls, so only textures.minecraft.net is
 // fetched), cached on disk and in memory. A skin that fails to load falls back to the default one.
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { decodePng, type RgbaImage } from './png.js';
@@ -48,7 +48,7 @@ export class SkinCache {
   /** The skin at `url`, or undefined (default skin) when it is not allowed or does not load. */
   get(url: string | undefined): Promise<RgbaImage | undefined> {
     if (!url || !isAllowedSkinUrl(url)) return Promise.resolve(undefined);
-    const key = url.replace(/^http:/, 'https:');
+    const key = url.replace(/^http:/i, 'https:');
     const hit = this.memory.get(key);
     if (hit) {
       this.memory.delete(key);
@@ -70,7 +70,8 @@ export class SkinCache {
     const file = join(this.dir, `${createHash('sha1').update(url).digest('hex')}.png`);
     let img: RgbaImage | undefined;
     try {
-      img = decodeSkin(await readFile(file));
+      const buf = await readFile(file);
+      img = buf.length < 512 * 1024 ? decodeSkin(buf) : undefined;
     } catch {
       img = undefined;
     }
@@ -81,10 +82,11 @@ export class SkinCache {
           const buf = Buffer.from(await res.arrayBuffer());
           if (buf.length < 512 * 1024) img = decodeSkin(buf);
           if (img) {
-            await mkdir(this.dir, { recursive: true });
-            const tmp = `${file}.${process.pid}.tmp`;
-            await writeFile(tmp, buf);
-            await rename(tmp, file);
+            const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+            await mkdir(this.dir, { recursive: true })
+              .then(() => writeFile(tmp, buf))
+              .then(() => rename(tmp, file))
+              .catch(() => undefined); // an unwritable cache doesn't lose the skin
           }
         }
       } catch {

@@ -17,6 +17,20 @@ describe('FleetTicker', () => {
     expect(ticker.size).toBe(0);
   });
 
+  it('runs a tick that is due within the slack (no skipped-then-doubled ticks)', () => {
+    let now = 0;
+    const ticker = new FleetTicker(() => now);
+    let ticks = 0;
+    const off = ticker.subscribe(() => ticks++);
+    now = TICK_MS - 0.4; // the timer fired on a whole-ms clock, a hair early
+    ticker.run();
+    expect(ticks).toBe(1);
+    now = 2 * TICK_MS;
+    ticker.run();
+    expect(ticks).toBe(2);
+    off();
+  });
+
   it('isolates a throwing subscriber', () => {
     let now = 0;
     const ticker = new FleetTicker(() => now);

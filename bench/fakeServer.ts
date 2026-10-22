@@ -55,6 +55,11 @@ export interface FakeServerStats {
   /** Packets sent to the first connected client only, by name. */
   perClient: Record<string, number>;
   menuClicks: Array<{ username: string; slot: number }>;
+  /** Logins that came in with the transfer intent (1.20.5+). */
+  transferLogins: number;
+  /** Cookie values the clients sent back, by key. */
+  cookies: Record<string, string>;
+  pings: number;
   /** Worst lateness of the 50 ms entity tick (server overloaded when this grows). */
   tickLagMaxMs: number;
   serverCpuMs: number;
@@ -144,6 +149,9 @@ export async function startFakeServer(options: FakeServerOptions): Promise<FakeS
   let bytes: Record<string, number> = {};
   let perClient: Record<string, number> = {};
   let menuClicks: FakeServerStats['menuClicks'] = [];
+  let transferLogins = 0;
+  const cookies: Record<string, string> = {};
+  let pings = 0;
   let sampleClient: Client | null = null;
   let since = Date.now();
   let cpuSince = process.cpuUsage();
@@ -563,6 +571,33 @@ export async function startFakeServer(options: FakeServerOptions): Promise<FakeS
       const cmd = text.replace(/^\//, '').trim().toLowerCase();
       log(`[fake ${version}] ${client.username}: /${cmd}`);
       if (cmd === 'menu') openMenu(client);
+      if (cmd === 'tnt') {
+        // Primed TNT next to the bot (an object id before 1.14), then its explosion.
+        const id = 900_000 + Math.floor(Math.random() * 1000);
+        const tntType = atLeast('1.14') ? entityType('tnt') : 50;
+        const at = { x: spawn.x + 2, y: spawn.y, z: spawn.z + 2 };
+        const pos = absFixed ? { x: Math.round(at.x * 32), y: Math.round(at.y * 32), z: Math.round(at.z * 32) } : at;
+        send(client, 'spawn_entity', {
+          entityId: id,
+          objectUUID: offlineUuid(`tnt${id}`),
+          type: tntType,
+          ...pos,
+          pitch: 0,
+          yaw: 0,
+          headPitch: 0,
+          objectData: 0,
+          velocity: { x: 0, y: 0, z: 0 },
+          velocityX: 0,
+          velocityY: 0,
+          velocityZ: 0,
+        });
+        send(client, 'explosion', { ...at, center: at, radius: 4, affectedBlockOffsets: [], blockCount: 0, sound: { soundId: 1 } });
+      }
+      if (cmd === 'transfer') {
+        send(client, 'store_cookie', { key: 'posse:test', value: Buffer.from('carried') });
+        send(client, 'transfer', { host: o.host, port: (server as unknown as { socketServer: { address(): { port: number } } }).socketServer.address().port });
+      }
+      if (cmd === 'cookie') send(client, 'cookie_request', { cookie: 'posse:test' });
       if (cmd === 'dropfloor') {
         // Removes the 4 blocks under spawn (a cannon blowing out the floor): the bot must fall.
         const x = Math.floor(spawn.x);
@@ -588,12 +623,27 @@ export async function startFakeServer(options: FakeServerOptions): Promise<FakeS
         }
       },
     );
+    client.on('ping_request', (p: { id: unknown }) => {
+      pings++;
+      send(client, 'ping_response', { id: p.id });
+    });
+    client.on('cookie_response', (p: { key: string; value?: Buffer }) => {
+      cookies[p.key] = p.value ? Buffer.from(p.value).toString() : '';
+    });
     client.on('end', () => {
       inWorld.delete(client);
       if (sampleClient === client) sampleClient = null;
     });
   };
 
+  // minecraft-protocol's server only knows the status and login intents; a transfer (3) logs in too.
+  server.on('connection', (client: Client) => {
+    client.once('set_protocol', (p: { nextState: number }) => {
+      if (p.nextState !== 3) return;
+      transferLogins++;
+      client.state = 'login' as never;
+    });
+  });
   server.on('login', (client: Client) => onPlayClient(client));
   server.on('playerJoin', (client: Client) => {
     try {
@@ -712,6 +762,9 @@ export async function startFakeServer(options: FakeServerOptions): Promise<FakeS
         bytes: { ...bytes },
         perClient: { ...perClient },
         menuClicks: [...menuClicks],
+        transferLogins,
+        cookies: { ...cookies },
+        pings,
         tickLagMaxMs,
         serverCpuMs: (cpu.user + cpu.system) / 1000,
       };

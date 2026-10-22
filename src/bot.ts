@@ -6,12 +6,15 @@ import mc, { type Client } from 'minecraft-protocol';
 import nbt from 'prismarine-nbt';
 import type { Registry } from 'prismarine-registry';
 import { Vec3 } from 'vec3';
-import { installDemandDecoding, type DemandDecoding } from './decode.js';
+import { installDemandDecoding, packetNames, type DemandDecoding } from './decode.js';
 import { installChat } from './features/chat.js';
 import { installInventory, type InventoryApi } from './features/inventory.js';
 import { installMotion, type MotionApi } from './features/motion.js';
 import { installPlayers } from './features/players.js';
 import { installScoreboard } from './features/scoreboard.js';
+import { createSpawnWatch, type SpawnWatch } from './features/spawns.js';
+import { installHealthStats, type HealthStats } from './features/serverHealth.js';
+import { installCookies } from './features/cookies.js';
 import { installWorld } from './features/world.js';
 import { chatLoader, connectionRegistry, versionKit, type VersionKit } from './registry.js';
 import type {
@@ -26,6 +29,8 @@ import type {
   PosseOptions,
   PosseStats,
   Scoreboard,
+  SpawnInfo,
+  SpawnWatchOptions,
   Team,
   Window,
 } from './types.js';
@@ -104,6 +109,12 @@ export class PosseBot extends EventEmitter {
     () => Promise.resolve([]);
   private resourcePack: { hash?: string; uuid?: string } = {};
   private ended = false;
+  private spawns!: SpawnWatch;
+  private serverHealth!: HealthStats;
+  /** Cookies the server stored (1.20.5+); a transfer carries them to the next server. */
+  readonly cookies = new Map<string, Buffer>();
+  /** Where the server transferred this bot (1.20.5+), once it did. */
+  transferTarget: { host: string; port: number } | null = null;
 
   constructor(options: PosseOptions) {
     super();
@@ -131,12 +142,30 @@ export class PosseBot extends EventEmitter {
     this._client.on('end', (reason: string) => {
       this.ended = true;
       this.motion?.stop();
+      this.world?.clear(); // releases this bot's share of the fleet chunk store
       this.emit('end', reason);
     });
+    for (const [k, v] of Object.entries(options.transfer?.cookies ?? {})) this.cookies.set(k, Buffer.from(v));
 
     const client = this._client as Client & { wait_connect?: boolean };
-    if (client.wait_connect) client.once('connect_allowed', () => this.init(client.version));
-    else this.init(client.version);
+    // An unsupported version must not leave the connection running unowned.
+    const start = (): void => {
+      try {
+        this.init(client.version);
+      } catch (err) {
+        this.end('Unsupported version');
+        throw err;
+      }
+    };
+    if (client.wait_connect) {
+      client.once('connect_allowed', () => {
+        try {
+          start();
+        } catch (err) {
+          this.emit('error', err as Error);
+        }
+      });
+    } else start();
   }
 
   /** Wall-clock ms of the last packet received. */
@@ -178,11 +207,27 @@ export class PosseBot extends EventEmitter {
       setSend: (fn) => (this.chatSend = fn),
       setTabComplete: (fn) => (this.tabCompleteImpl = fn),
     });
-    installPlayers(this, this.options.entities ?? 'players');
+    this.spawns = createSpawnWatch(this);
+    installPlayers(this, this.options.entities ?? 'players', this.spawns);
+    this.serverHealth = installHealthStats(this);
+    installCookies(this);
     installScoreboard(this);
     this.inventoryApi = installInventory(this);
     installWorld(this);
     this.motion = installMotion(this, this.options.physics ?? true);
+    guardWrites(this._client, this.version, this.options.transfer !== undefined);
+
+    // Last, so every feature has reset its state (bot.entity, players, windows…) when it fires.
+    const client = this._client as any;
+    client.on('login', () => {
+      this.emit('login');
+      this.emit('game');
+      client.writeChannel(this.brandChannel, this.options.brand ?? 'vanilla');
+    });
+  }
+
+  private get brandChannel(): string {
+    return this.supportFeature('customChannelMCPrefixed') ? 'MC|Brand' : 'minecraft:brand';
   }
 
   // ── Game state ────────────────────────────────────────────────
@@ -236,7 +281,7 @@ export class PosseBot extends EventEmitter {
   private installGame(): void {
     const client = this._client as any;
     const sf = this.supportFeature;
-    const brandChannel = sf('customChannelMCPrefixed') ? 'MC|Brand' : 'minecraft:brand';
+    const brandChannel = this.brandChannel;
     client.registerChannel(brandChannel, ['string', []]);
 
     client.on('registry_data', (packet: Packet) => (this.registry as any).loadDimensionCodec(packet.codec || packet));
@@ -248,9 +293,6 @@ export class PosseBot extends EventEmitter {
       this.username = client.username;
       this.world.clear();
       this.sendSettings();
-      this.emit('login');
-      this.emit('game');
-      client.writeChannel(brandChannel, this.options.brand ?? 'vanilla');
     });
 
     client.on('respawn', (packet: Packet) => {
@@ -366,8 +408,11 @@ export class PosseBot extends EventEmitter {
 
   private installMisc(): void {
     const client = this._client as any;
-    client.on('kick_disconnect', (packet: Packet) => this.emit('kicked', packet.reason, true));
-    client.on('disconnect', (packet: Packet) => this.emit('kicked', packet.reason, false));
+    // 1.20.3+ play kicks are NBT: hand them over as JSON text, like every other version.
+    const reasonText = (reason: unknown): string | object =>
+      reason && typeof reason === 'object' && 'type' in reason ? JSON.stringify(nbt.simplify(reason as never)) : (reason as string);
+    client.on('kick_disconnect', (packet: Packet) => this.emit('kicked', reasonText(packet.reason), true));
+    client.on('disconnect', (packet: Packet) => this.emit('kicked', reasonText(packet.reason), false));
 
     const autoAccept = this.options.acceptResourcePacks ?? true;
     const onPack = (url: string, id: { hash?: string; uuid?: string }): void => {
@@ -380,8 +425,27 @@ export class PosseBot extends EventEmitter {
     );
     client.on('add_resource_pack', (packet: Packet) => onPack(packet.url, { uuid: packet.uuid }));
 
-    // 1.20.5+: the server may move us to another server; minecraft-protocol doesn't follow it.
-    client.on('transfer', (packet: Packet) => this.emit('transfer', packet.host, packet.port));
+    // 1.20.5+: the server moves us to another server. Like the game, this connection ends; the new
+    // one is `followTransfer()` (or `createBot(bot.transferOptions())`), cookies included.
+    client.on('transfer', (packet: Packet) => {
+      this.transferTarget = { host: packet.host, port: packet.port };
+      this.emit('transfer', packet.host, packet.port);
+      this.end('Transferred');
+    });
+  }
+
+  /** Options for connecting to the server this bot was transferred to (null if it wasn't). */
+  transferOptions(): PosseOptions | null {
+    if (!this.transferTarget) return null;
+    const cookies: Record<string, Buffer> = {};
+    for (const [k, v] of this.cookies) cookies[k] = v;
+    return { ...this.options, host: this.transferTarget.host, port: this.transferTarget.port, transfer: { cookies } };
+  }
+
+  /** Connects a new bot to the server this one was transferred to (null if it wasn't). */
+  followTransfer(): PosseBot | null {
+    const options = this.transferOptions();
+    return options ? new PosseBot(options) : null;
   }
 
   private writePackResult(result: number): void {
@@ -405,18 +469,19 @@ export class PosseBot extends EventEmitter {
 
   chat(message: string): void {
     if (typeof message !== 'string') message = String(message);
+    const limit = this.supportFeature('lessCharsInChat') ? 100 : 256;
     if (message.startsWith('/')) {
-      this.chatSend(message);
+      // A command can't be split; over the limit the server kicks, so cut it like the game's chat box.
+      this.chatSend(message.split('\n')[0]!.slice(0, limit));
       return;
     }
-    const limit = this.supportFeature('lessCharsInChat') ? 100 : 256;
     for (const line of message.split('\n')) {
       for (let i = 0; i < line.length; i += limit) this.chatSend(line.substring(i, i + limit));
     }
   }
 
   whisper(username: string, message: string): void {
-    this.chatSend(`/tell ${username} ${message}`);
+    this.chat(`/tell ${username} ${message}`);
   }
 
   tabComplete(text: string, assumeCommand = false, sendBlockInSight = false, timeout = 5000): Promise<string[]> {
@@ -487,6 +552,37 @@ export class PosseBot extends EventEmitter {
     return this.look(yaw, pitch, force);
   }
 
+  // ── Watching and server health ────────────────────────────────
+
+  /**
+   * Reports spawns of these entity types (modern names: `tnt`, `falling_block`, `item`…) without
+   * tracking the entities: nothing else about them is decoded. Returns the unsubscribe function.
+   */
+  watchSpawns(names: string[], listener: (spawn: SpawnInfo) => void, options?: SpawnWatchOptions): () => void {
+    return this.spawns.watch(names, listener, options);
+  }
+
+  /**
+   * The server's ticks per second over the last ~10 s (from its time updates), or null until it has
+   * sent enough of them. 20 is a healthy server.
+   */
+  get tps(): number | null {
+    return this.serverHealth?.tps() ?? null;
+  }
+
+  /** The last measured round trip to the server in ms (see `ping()`), or the tab list's figure. */
+  get latency(): number | null {
+    return this.serverHealth?.latency() ?? null;
+  }
+
+  /**
+   * Measures the round trip to the server now (1.20.2+: ping request; older: the server's own
+   * keep-alive figure from the tab list). Rejects after `timeout` ms.
+   */
+  ping(timeout = 10_000): Promise<number> {
+    return this.serverHealth.ping(timeout);
+  }
+
   // ── World ─────────────────────────────────────────────────────
 
   /** The block at a position, or null when its chunk isn't kept (outside `worldRadius`). */
@@ -522,6 +618,7 @@ export class PosseBot extends EventEmitter {
       entities: Object.keys(this.entities).length,
       players: Object.keys(this.players).length,
       physicsTicks: this.motion?.physicsTicks ?? 0,
+      server: { tps: this.tps, latency: this.latency },
     };
   }
 
@@ -531,6 +628,36 @@ export class PosseBot extends EventEmitter {
   }
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */
+
+const serverboundCache = new Map<string, Set<string>>();
+
+/** Serverbound packet names for a version and protocol state. */
+export function serverboundNames(version: string, state: string): Set<string> {
+  const key = `${version};${state}`;
+  let names = serverboundCache.get(key);
+  if (!names) {
+    names = new Set(packetNames(version, state, 'toServer'));
+    serverboundCache.set(key, names);
+  }
+  return names;
+}
+
+/**
+ * Drops writes the current protocol state has no packet for. On 1.20.2+ a server can send the bot
+ * back to the configuration state at any time (proxies do on every server switch); a play packet
+ * written then is serialized as some other configuration packet and the server kicks the bot.
+ */
+function guardWrites(client: Client, version: string, transfer: boolean): void {
+  const write = client.write.bind(client);
+  // A transferred connection says so in its handshake (intent 3, 1.20.5+).
+  const transferIntent = transfer && packetNames(version, 'play').includes('transfer');
+  client.write = (name: string, params: unknown) => {
+    const names = serverboundNames(version, client.state);
+    if (names.size > 0 && !names.has(name)) return;
+    if (transferIntent && name === 'set_protocol') params = { ...(params as object), nextState: 3 };
+    write(name, params);
+  };
+}
 
 export function createBot(options: PosseOptions): PosseBot {
   return new PosseBot(options);

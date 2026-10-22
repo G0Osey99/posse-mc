@@ -6,6 +6,7 @@ import type { ChatMessage } from 'prismarine-chat';
 import type { Entity } from 'prismarine-entity';
 import type { Item } from 'prismarine-item';
 import type { Window } from 'prismarine-windows';
+import type { Vec3 } from 'vec3';
 
 export type { Block, ChatMessage, Entity, Item, Window, Client };
 
@@ -37,8 +38,42 @@ export interface PosseOptions {
   physics?: boolean;
   /** Decode every packet, like mineflayer (debugging / compatibility). */
   decodeAll?: boolean;
+  /**
+   * How long chat and commands sent while the bot isn't in the game (before it joins, or while a
+   * 1.20.2+ server or proxy has it in the configuration state) are held and sent once it's back, in
+   * ms (default 30 000). Older ones are dropped, like 0 drops them all.
+   */
+  holdChatMs?: number;
+  /** Set on a connection that follows a transfer (see `bot.transferOptions()`). */
+  transfer?: { cookies?: Record<string, Buffer | Uint8Array> };
   /** For tests: a custom minecraft-protocol client factory. */
   createClient?: (options: Record<string, unknown>) => Client;
+}
+
+/** A spawn reported by `bot.watchSpawns` (the entity itself isn't tracked). */
+export interface SpawnInfo {
+  id: number;
+  /** Modern entity name (`tnt`, `falling_block`, `item`…), in every version. */
+  name: string;
+  position: Vec3;
+  uuid?: string;
+  /** Blocks per tick, when the packet carries it. */
+  velocity?: Vec3;
+  /** The spawn's data field (falling block state, item frame direction…). */
+  data?: number;
+}
+
+export interface SpawnWatchOptions {
+  /** Only spawns within this many blocks of the bot (default: any distance). */
+  within?: number;
+}
+
+export interface ExplosionInfo {
+  position: Vec3;
+  /** ≤1.21.1 and 26.1+. */
+  radius?: number;
+  /** Blocks the explosion destroyed, when the packet says (≤1.21.1 lists them). */
+  blockCount?: number;
 }
 
 export interface Player {
@@ -110,6 +145,8 @@ export interface PosseStats {
   entities: number;
   players: number;
   physicsTicks: number;
+  /** The server's ticks per second (null until known) and the last round trip in ms. */
+  server: { tps: number | null; latency: number | null };
 }
 
 export interface PosseBotEvents {
@@ -139,8 +176,8 @@ export interface PosseBotEvents {
   entityMoved: (entity: Entity) => void;
   playerCollect: (collector: Entity, collected: Entity) => void;
   blockUpdate: (oldBlock: Block | null, newBlock: Block) => void;
-  chunkColumnLoad: (point: { x: number; y: number; z: number }) => void;
-  chunkColumnUnload: (point: { x: number; y: number; z: number }) => void;
+  chunkColumnLoad: (point: Vec3) => void;
+  chunkColumnUnload: (point: Vec3) => void;
   scoreboardCreated: (scoreboard: Scoreboard) => void;
   scoreboardDeleted: (scoreboard: Scoreboard) => void;
   scoreboardTitleChanged: (scoreboard: Scoreboard) => void;
@@ -156,6 +193,8 @@ export interface PosseBotEvents {
   forcedMove: () => void;
   move: () => void;
   physicsTick: () => void;
+  /** An explosion the server reported (any size, anywhere in view). */
+  explosion: (explosion: ExplosionInfo) => void;
   /** Server-initiated transfer to another server (1.20.5+). */
   transfer: (host: string, port: number) => void;
   [event: `setWindowItems:${number}`]: () => void;

@@ -1,5 +1,6 @@
 // Feeds the lazy world (../world.ts) from chunk and block packets. Chunks outside the keep radius
 // are dropped by a peek at their coordinates, before decoding; light packets are never listened to.
+import { Vec3 } from 'vec3';
 import type { PosseBot } from '../bot.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- protocol packets are untyped JSON */
@@ -41,7 +42,7 @@ export function installWorld(bot: PosseBot): void {
   bot.decoding.setFilter('map_chunk', chunkCoordFilter((x, z) => world.wants(x, z)));
 
   const loaded = (x: number, z: number): void => {
-    if (bot.listenerCount('chunkColumnLoad') > 0) bot.emit('chunkColumnLoad', { x: x * 16, y: 0, z: z * 16 });
+    if (bot.listenerCount('chunkColumnLoad') > 0) bot.emit('chunkColumnLoad', new Vec3(x * 16, 0, z * 16));
   };
 
   client.on('map_chunk', (packet: any) => {
@@ -74,7 +75,7 @@ export function installWorld(bot: PosseBot): void {
 
   client.on('unload_chunk', (packet: any) => {
     world.unload(packet.chunkX, packet.chunkZ);
-    if (bot.listenerCount('chunkColumnUnload') > 0) bot.emit('chunkColumnUnload', { x: packet.chunkX * 16, y: 0, z: packet.chunkZ * 16 });
+    if (bot.listenerCount('chunkColumnUnload') > 0) bot.emit('chunkColumnUnload', new Vec3(packet.chunkX * 16, 0, packet.chunkZ * 16));
   });
 
   const change = (x: number, y: number, z: number, stateId: number): void => {
@@ -105,6 +106,14 @@ export function installWorld(bot: PosseBot): void {
   });
 
   client.on('explosion', (packet: any) => {
+    if (bot.listenerCount('explosion') > 0) {
+      const c = packet.center ?? packet;
+      bot.emit('explosion', {
+        position: new Vec3(c.x, c.y, c.z),
+        ...(packet.radius !== undefined ? { radius: packet.radius } : {}),
+        ...(packet.affectedBlockOffsets ? { blockCount: packet.affectedBlockOffsets.length } : packet.blockCount !== undefined ? { blockCount: packet.blockCount } : {}),
+      });
+    }
     // ≤1.21.2 lists destroyed blocks; later servers send block changes instead.
     for (const o of packet.affectedBlockOffsets ?? []) {
       change(Math.floor(packet.x) + o.x, Math.floor(packet.y) + o.y, Math.floor(packet.z) + o.z, 0);

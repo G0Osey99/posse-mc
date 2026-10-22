@@ -1,5 +1,6 @@
 // Inventory and container windows: clicks with per-version bookkeeping (action numbers and
 // `transaction` confirmations ≤1.16, state ids 1.17+), held item, equip, use item.
+import minecraftData from 'minecraft-data';
 import nbt from 'prismarine-nbt';
 import { Vec3 } from 'vec3';
 import type { PosseBot } from '../bot.js';
@@ -9,6 +10,12 @@ import type { Item, Window } from '../types.js';
 /* eslint-disable @typescript-eslint/no-explicit-any -- prismarine-windows/items and packets are loosely typed */
 
 const WINDOW_TIMEOUT = 5000;
+
+/** Whether `window_click` slots are HashedSlots (1.21.5+). */
+export function clickUsesHashedSlots(version: string): boolean {
+  const types = (minecraftData(version)?.protocol as any)?.play?.toServer?.types;
+  return JSON.stringify(types?.packet_window_click ?? '').includes('HashedSlot');
+}
 const QUICK_BAR_START = 36;
 const QUICK_BAR_COUNT = 9;
 
@@ -189,6 +196,16 @@ export function installInventory(bot: PosseBot): InventoryApi {
   };
   client.on('transaction', (packet: any) => confirmTransaction(packet.windowId, packet.action, packet.accepted));
 
+  // 1.21.5+ clicks carry HashedSlots: an absent option for an empty slot, and per component a hash
+  // of its value. Posse sends no component hashes; the server treats them as a mismatch and resyncs
+  // the slot (as it does after any misprediction), which keeps the window consistent.
+  const hashedSlots = clickUsesHashedSlots(bot.version);
+  const clickSlot = (item: Item | null): unknown => {
+    if (!hashedSlots) return Item.toNotch(item);
+    if (!item || item.count <= 0) return undefined;
+    return { itemId: item.type, itemCount: item.count, components: [], removeComponents: [] };
+  };
+
   const changedSlotsOf = (window: any, click: PendingClick): Array<{ location: number; item: unknown }> => {
     let changed: number[];
     if ([0, 3, 4].includes(click.mode)) {
@@ -199,7 +216,7 @@ export function installInventory(bot: PosseBot): InventoryApi {
       changed = [];
       for (let i = 0; i < window.slots.length; i++) if (!Item.equal(before[i], window.slots[i])) changed.push(i);
     }
-    return changed.map((location) => ({ location, item: Item.toNotch(window.slots[location]) }));
+    return changed.map((location) => ({ location, item: clickSlot(window.slots[location]) }));
   };
 
   const clickWindow = async (slot: number, mouseButton: number, mode: number): Promise<void> => {
@@ -244,7 +261,7 @@ export function installInventory(bot: PosseBot): InventoryApi {
       mouseButton,
       mode,
       changedSlots,
-      cursorItem: Item.toNotch(window.selectedItem),
+      cursorItem: clickSlot(window.selectedItem),
     });
   };
 

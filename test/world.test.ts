@@ -2,7 +2,8 @@ import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
 import { Vec3 } from 'vec3';
 import { versionKit } from '../src/registry.js';
-import { LazyWorld, chunkDistance, localIndex, unpackLocalIndex } from '../src/world.js';
+import { ChunkStore } from '../src/chunkStore.js';
+import { KEEP_MARGIN, LazyWorld, chunkDistance, localIndex, unpackLocalIndex } from '../src/world.js';
 import { chunkCoordFilter } from '../src/features/world.js';
 
 const require = createRequire(import.meta.url);
@@ -57,13 +58,31 @@ describe('LazyWorld (1.18.2)', () => {
     const { kit, data } = chunkPayload('1.18.2', () => undefined);
     const world = new LazyWorld(kit, dim, 2);
     world.setCenter(0, 0);
-    expect(world.addLoad(2, 0, { data })).toBe(true);
-    expect(world.addLoad(3, 0, { data })).toBe(false);
-    world.setCenter(1, 0); // (2,0) is now 1 away; moving back keeps it until it's radius + 2 away
-    world.setCenter(-1, 0);
-    expect(world.hasColumn(2, 0)).toBe(true);
+    // Kept up to radius + KEEP_MARGIN, so a short walk doesn't leave holes the server won't refill.
+    expect(world.addLoad(2 + KEEP_MARGIN, 0, { data })).toBe(true);
+    expect(world.addLoad(3 + KEEP_MARGIN, 0, { data })).toBe(false);
+    world.setCenter(1, 0);
+    world.setCenter(0, 0);
+    expect(world.hasColumn(2 + KEEP_MARGIN, 0)).toBe(true);
     world.setCenter(10, 10);
-    expect(world.hasColumn(2, 0)).toBe(false);
+    expect(world.hasColumn(2 + KEEP_MARGIN, 0)).toBe(false);
+  });
+
+  it('shares identical payloads between bots and frees them with the last one', () => {
+    const { kit, data } = chunkPayload('1.18.2', (set) => set(1, 64, 2, stone));
+    const store = new ChunkStore();
+    const a = new LazyWorld(kit, dim, 4, 16, store);
+    const b = new LazyWorld(kit, dim, 4, 16, store);
+    a.addLoad(0, 0, { data });
+    b.addLoad(0, 0, { data: Buffer.from(data) });
+    b.addLoad(1, 0, { data });
+    expect(store.stats()).toMatchObject({ payloads: 1, refs: 3 });
+    expect(b.stateIdAt(1, 64, 2)).toBe(stone);
+    a.clear();
+    expect(store.stats()).toMatchObject({ payloads: 1, refs: 2 });
+    b.unload(1, 0);
+    b.setCenter(100, 100); // evicts (0,0)
+    expect(store.stats()).toMatchObject({ payloads: 0, refs: 0, bytes: 0 });
   });
 
   it('keeps nothing with radius 0', () => {
