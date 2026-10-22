@@ -44,11 +44,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/G0Osey99/posse.git"
+    "url": "git+https://github.com/G0Osey99/posse-mc.git"
   },
-  "homepage": "https://github.com/G0Osey99/posse#readme",
+  "homepage": "https://github.com/G0Osey99/posse-mc#readme",
   "bugs": {
-    "url": "https://github.com/G0Osey99/posse/issues"
+    "url": "https://github.com/G0Osey99/posse-mc/issues"
   },
   "engines": {
     "node": ">=22.0.0"
