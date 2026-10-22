@@ -91,7 +91,9 @@ describe('palette pack', () => {
     expect([...back.kernel.models.subarray(0, 200)]).toEqual([
       ...pack.kernel.models.subarray(0, 200),
     ]);
-    expect(back.kernel.mips[0]).toEqual(pack.kernel.mips[0]);
+    // Byte comparison: a deep toEqual over the multi-megabyte atlas takes seconds.
+    const bytes = (a: ArrayBufferView) => Buffer.from(a.buffer, a.byteOffset, a.byteLength);
+    expect(bytes(back.kernel.mips[0]!).equals(bytes(pack.kernel.mips[0]!))).toBe(true);
     expect(deserializePack(Buffer.from('garbage'))).toBeUndefined();
   });
 });
