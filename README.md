@@ -8,7 +8,8 @@ each bot sees, with the game's own textures.
 > Early release (0.x): verified against a local test server on 1.8.9, 1.12.2, 1.16.5, 1.18.2,
 > 1.19.4, 1.20.4, 1.21.4 and 26.1, and digging, building, crafting, trading, books, enchanting,
 > fishing, block search and pathfinding against vanilla servers on 1.8.9, 1.12.2, 1.16.5, 1.20.4,
-> 1.21.4 and 26.1. Reports
+> 1.21.4 and 26.1. The pathfinder's courses also run without a single GrimAC violation on Paper
+> 1.8.8, 1.12.2, 1.18.2, 1.20.4 and 1.21.4 (`bench/live-pathfinder.ts --grim`). Reports
 > from live servers are welcome.
 
 ## Why
