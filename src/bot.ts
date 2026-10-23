@@ -7,8 +7,20 @@ import nbt from 'prismarine-nbt';
 import type { Registry } from 'prismarine-registry';
 import { Vec3 } from 'vec3';
 import { installDemandDecoding, packetNames, type DemandDecoding } from './decode.js';
+import { installBooks, type BooksApi } from './features/books.js';
+import { installBuilding, type BuildingApi, type PlaceOptions } from './features/building.js';
 import { installChat } from './features/chat.js';
-import { installInventory, type InventoryApi } from './features/inventory.js';
+import { installCrafting, type CraftingApi } from './features/crafting.js';
+import { installDigging, type DigFace, type DiggingApi } from './features/digging.js';
+import { installEffects } from './features/effects.js';
+import { installInteract, type InteractApi } from './features/interact.js';
+import { installInventory, type InventoryApi, type OpenWindow, type TransferOptions } from './features/inventory.js';
+import { installRaycast, type RaycastApi, type RaycastBlock } from './features/raycast.js';
+import { installVillager, type Villager, type VillagerApi } from './features/villager.js';
+import { installWorkstations, type EnchantmentTable, type Furnace, type WorkstationApi } from './features/workstations.js';
+import type { Recipe } from './recipes.js';
+import { Pathfinder } from './pathfinder/pathfinder.js';
+import { Simulator } from './physics/simulator.js';
 import { installMotion, type MotionApi } from './features/motion.js';
 import { installPlayers } from './features/players.js';
 import { installScoreboard } from './features/scoreboard.js';
@@ -101,9 +113,27 @@ export class PosseBot extends EventEmitter {
   currentWindow: Window | null = null;
   quickBarSlot = 0;
   readonly QUICK_BAR_START = 36;
+  /** Whether an item is being used (eaten, drawn…) since `activateItem`. */
+  usingHeldItem = false;
+  experience = { level: 0, points: 0, progress: 0 };
+  /** The block being dug, and the face (protocol number) it's dug from. */
+  targetDigBlock: Block | null = null;
+  targetDigFace: number | null = null;
+  /** `performance.now()` when the last dig ended (clicks on the hotbar wait a little after it). */
+  lastDigTime: number | null = null;
 
   private inventoryApi!: InventoryApi;
+  private interactApi!: InteractApi;
+  private raycastApi!: RaycastApi;
+  private diggingApi!: DiggingApi;
+  private buildingApi!: BuildingApi;
+  private craftingApi!: CraftingApi;
+  private villagerApi!: VillagerApi;
+  private booksApi!: BooksApi;
+  private workstationApi!: WorkstationApi;
   private motion!: MotionApi;
+  private pathfinderInstance: Pathfinder | null = null;
+  private simulatorInstance: Simulator | null = null;
   private chatSend: (message: string) => void = () => undefined;
   private tabCompleteImpl: (text: string, assumeCommand?: boolean, sendBlockInSight?: boolean, timeout?: number) => Promise<string[]> =
     () => Promise.resolve([]);
@@ -133,6 +163,9 @@ export class PosseBot extends EventEmitter {
       validateChannelProtocol: false,
     };
     this._client = options.createClient ? options.createClient(clientOptions) : mc.createClient(clientOptions as never);
+    // Every feature listens to a few lifecycle packets (login, respawn…): above Node's default 10.
+    (this._client as unknown as EventEmitter).setMaxListeners(64);
+    this.setMaxListeners(64);
     this.decoding = installDemandDecoding(this._client);
     this.decoding.decodeAll = options.decodeAll ?? false;
 
@@ -171,6 +204,18 @@ export class PosseBot extends EventEmitter {
   /** Wall-clock ms of the last packet received. */
   get lastPacketAt(): number {
     return this.decoding.lastPacketAt;
+  }
+
+  /** The pathfinder (created on first use: bots that never path pay nothing for it). */
+  get pathfinder(): Pathfinder {
+    this.pathfinderInstance ??= new Pathfinder(this);
+    return this.pathfinderInstance;
+  }
+
+  /** Forward simulation of the bot's movement (where it would be after some ticks of input). */
+  get simulator(): Simulator {
+    this.simulatorInstance ??= new Simulator(this);
+    return this.simulatorInstance;
   }
 
   get physicsEnabled(): boolean {
@@ -212,8 +257,17 @@ export class PosseBot extends EventEmitter {
     this.serverHealth = installHealthStats(this);
     installCookies(this);
     installScoreboard(this);
+    installEffects(this);
+    this.interactApi = installInteract(this);
     this.inventoryApi = installInventory(this);
     installWorld(this);
+    this.raycastApi = installRaycast(this);
+    this.diggingApi = installDigging(this);
+    this.buildingApi = installBuilding(this);
+    this.craftingApi = installCrafting(this);
+    this.villagerApi = installVillager(this);
+    this.booksApi = installBooks(this);
+    this.workstationApi = installWorkstations(this);
     this.motion = installMotion(this, this.options.physics ?? true);
     guardWrites(this._client, this.version, this.options.transfer !== undefined);
 
@@ -526,6 +580,184 @@ export class PosseBot extends EventEmitter {
     this.emit('heldItemChanged', this.heldItem);
   }
 
+  /** Eats or drinks the held item; resolves when the server says it's done. */
+  consume(): Promise<void> {
+    return this.inventoryApi.consume();
+  }
+
+  /** Puts the cursor stack back into a slot range of `window` (dropping what doesn't fit). */
+  putSelectedItemRange(start: number, end: number, window: Window, slot: number | null): Promise<void> {
+    return this.inventoryApi.putSelectedItemRange(start, end, window, slot);
+  }
+
+  /** Moves a slot's stack of the current window into its inventory part. */
+  putAway(slot: number): Promise<void> {
+    return this.inventoryApi.putAway(slot);
+  }
+
+  /** Moves `count` items of a type between slot ranges of a window. */
+  transfer(options: TransferOptions): Promise<void> {
+    return this.inventoryApi.transfer(options);
+  }
+
+  /** Asks the server for a window's full contents (1.17+; a no-op before). */
+  syncWindow(window: Window): Promise<void> {
+    return this.inventoryApi.syncWindow(window);
+  }
+
+  /** @internal mineflayer's name for `syncWindow`. */
+  _syncWindow(window: Window): Promise<void> {
+    return this.inventoryApi.syncWindow(window);
+  }
+
+  /** Drops `count` items of a type (all of them when `count` is null). */
+  toss(itemType: number, metadata: number | null, count: number | null): Promise<void> {
+    return this.inventoryApi.toss(itemType, metadata, count ?? (this.inventory as unknown as { count(t: number, m: number | null): number }).count(itemType, metadata));
+  }
+
+  /** Drops a whole stack. */
+  tossStack(item: Item): Promise<void> {
+    return this.inventoryApi.tossStack(item);
+  }
+
+  /** The inventory slot of an equipment destination (`hand` is the selected hotbar slot). */
+  getEquipmentDestSlot(destination: 'hand' | 'head' | 'torso' | 'legs' | 'feet' | 'off-hand'): number {
+    return this.inventoryApi.equipmentSlot(destination);
+  }
+
+  /** @internal */
+  equipmentSlot(destination: 'hand' | 'head' | 'torso' | 'legs' | 'feet' | 'off-hand'): number {
+    return this.inventoryApi.equipmentSlot(destination);
+  }
+
+  // ── Using blocks and entities ─────────────────────────────────
+
+  /** @internal The block-prediction sequence shared by digging, placing and using items (1.19+). */
+  _nextSequence(): number {
+    return this.interactApi.nextSequence();
+  }
+
+  swingArm(arm: 'right' | 'left' = 'right', showHand = true): void {
+    this.interactApi.swingArm(arm, showHand);
+  }
+
+  /** Right-clicks a block (a door, a button, a chest…), looking at the clicked face first. */
+  activateBlock(block: Block, direction?: Vec3, cursorPos?: Vec3): Promise<void> {
+    return this.interactApi.activateBlock(block, direction, cursorPos);
+  }
+
+  /** Right-clicks an entity (a villager, a minecart…). */
+  activateEntity(entity: Pick<Entity, 'id' | 'position'>): Promise<void> {
+    return this.interactApi.activateEntity(entity);
+  }
+
+  /** Right-clicks an entity at a point on its hitbox (armour stands). */
+  activateEntityAt(entity: Pick<Entity, 'id' | 'position'>, position: Vec3): Promise<void> {
+    return this.interactApi.activateEntityAt(entity, position);
+  }
+
+  /** Mounts or uses an entity (right-click without looking). */
+  useOn(entity: Pick<Entity, 'id' | 'position'>): Promise<void> {
+    return this.interactApi.activateEntity(entity);
+  }
+
+  attack(entity: Pick<Entity, 'id'>, swing = true): void {
+    this.interactApi.attack(entity, swing);
+  }
+
+  /** @internal Right-clicks a block face with the held item (placing and activating share it). */
+  useOnBlock(block: { position: Vec3 }, face: Vec3, cursor: Vec3, options: { hand?: number; forceLook?: boolean | 'ignore'; swing?: boolean }): Promise<void> {
+    return this.interactApi.useOnBlock(block, face, cursor, options);
+  }
+
+  /** Opens a block's window (activateBlock + windowOpen). */
+  openBlock(block: Block, direction?: Vec3, cursorPos?: Vec3): Promise<OpenWindow> {
+    return this.inventoryApi.openBlock(block, direction, cursorPos);
+  }
+
+  /** Opens an entity's window (activateEntity + windowOpen). */
+  openEntity(entity: Pick<Entity, 'id' | 'position'>): Promise<OpenWindow> {
+    return this.inventoryApi.openEntity(entity);
+  }
+
+  /** Opens a chest, barrel, shulker box, hopper… (a block) or a storage minecart (an entity). */
+  openContainer(target: Block | Pick<Entity, 'id' | 'position'>): Promise<OpenWindow> {
+    return this.workstationApi.openContainer(target);
+  }
+
+  openChest(target: Block | Pick<Entity, 'id' | 'position'>): Promise<OpenWindow> {
+    return this.workstationApi.openContainer(target);
+  }
+
+  openFurnace(block: Block): Promise<Furnace> {
+    return this.workstationApi.openFurnace(block);
+  }
+
+  openEnchantmentTable(block: Block): Promise<EnchantmentTable> {
+    return this.workstationApi.openEnchantmentTable(block);
+  }
+
+  /** Opens a villager's or wandering trader's trades (track it with `entities: 'all'`, or pass `{ id, position }`). */
+  openVillager(entity: Pick<Entity, 'id' | 'position'> & { name?: string }): Promise<Villager> {
+    return this.villagerApi.openVillager(entity);
+  }
+
+  trade(villager: Villager, index: number, count?: number): Promise<void> {
+    return this.villagerApi.trade(villager, index, count);
+  }
+
+  // ── Digging and building ──────────────────────────────────────
+
+  /**
+   * Digs a block: looks at the face it can see (`digFace`: `auto`, `raycast` or a face vector),
+   * waits the dig time and resolves once broken. `forceLook: 'ignore'` skips looking.
+   */
+  dig(block: Block, forceLook: boolean | 'ignore' = true, digFace: DigFace = 'auto'): Promise<void> {
+    return this.diggingApi.dig(block, forceLook, digFace);
+  }
+
+  stopDigging(): void {
+    this.diggingApi.stopDigging();
+  }
+
+  canDigBlock(block: Block): boolean {
+    return this.diggingApi.canDigBlock(block);
+  }
+
+  /** Ms to dig a block with the held item (Infinity when it can't be dug). */
+  digTime(block: Block): number {
+    return this.diggingApi.digTime(block);
+  }
+
+  /** Places the held block against `referenceBlock`'s face (`faceVector` points from it to the new block). */
+  placeBlock(referenceBlock: Block, faceVector: Vec3, options?: PlaceOptions): Promise<void> {
+    return this.buildingApi.placeBlock(referenceBlock, faceVector, options);
+  }
+
+  // ── Crafting, books ───────────────────────────────────────────
+
+  craft(recipe: Recipe, count = 1, craftingTable: Block | null = null): Promise<void> {
+    return this.craftingApi.craft(recipe, count, craftingTable);
+  }
+
+  recipesFor(itemType: number, metadata: number | null = null, minResultCount: number | null = 1, craftingTable: Block | boolean | null = null): Recipe[] {
+    return this.craftingApi.recipesFor(itemType, metadata, minResultCount, craftingTable);
+  }
+
+  recipesAll(itemType: number, metadata: number | null = null, craftingTable: Block | boolean | null = null): Recipe[] {
+    return this.craftingApi.recipesAll(itemType, metadata, craftingTable);
+  }
+
+  /** Writes pages into the book and quill in an inventory slot. */
+  writeBook(slot: number, pages: string[]): Promise<void> {
+    return this.booksApi.writeBook(slot, pages);
+  }
+
+  /** Writes and signs the book and quill in an inventory slot. */
+  signBook(slot: number, pages: string[], author: string, title: string): Promise<void> {
+    return this.booksApi.signBook(slot, pages, author, title);
+  }
+
   // ── Movement ──────────────────────────────────────────────────
 
   setControlState(control: ControlState, state: boolean): void {
@@ -542,6 +774,14 @@ export class PosseBot extends EventEmitter {
 
   look(yaw: number, pitch: number, force = true): Promise<void> {
     return this.motion.look(yaw, pitch, force);
+  }
+
+  /**
+   * Resolves once the next tick has sent the bot's position and rotation (at once if nothing is
+   * being sent). Use it after `look` to be sure the server has the rotation before an action.
+   */
+  afterTick(): Promise<void> {
+    return this.motion?.afterTick() ?? Promise.resolve();
   }
 
   lookAt(point: Vec3, force = true): Promise<void> {
@@ -588,6 +828,31 @@ export class PosseBot extends EventEmitter {
   /** The block at a position, or null when its chunk isn't kept (outside `worldRadius`). */
   blockAt(point: { x: number; y: number; z: number }): Block | null {
     return this.world.blockAt(point.x, point.y, point.z);
+  }
+
+  /** The first block a ray hits (with `face` and `intersect`), or null within `maxDistance`. */
+  raycast(from: Vec3, direction: Vec3, maxDistance: number, matcher?: (block: Block) => boolean): RaycastBlock | null {
+    return this.raycastApi.raycast(from, direction, maxDistance, matcher);
+  }
+
+  /** The block the bot is looking at. */
+  blockAtCursor(maxDistance = 256, matcher?: (block: Block) => boolean): RaycastBlock | null {
+    return this.raycastApi.blockAtCursor(maxDistance, matcher);
+  }
+
+  /** The block the bot is looking at within `maxSteps * vectorLength` blocks (mineflayer's older call). */
+  blockInSight(maxSteps = 256, vectorLength = 5 / 16): RaycastBlock | null {
+    return this.raycastApi.blockAtCursor(maxSteps * vectorLength);
+  }
+
+  /** The tracked entity at the crosshair, if no block is in front of it. */
+  entityAtCursor(maxDistance = 3.5): Entity | null {
+    return this.raycastApi.entityAtCursor(maxDistance);
+  }
+
+  /** Whether the bot's eyes have a clear line to the block. */
+  canSeeBlock(block: Block): boolean {
+    return this.raycastApi.canSeeBlock(block);
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────

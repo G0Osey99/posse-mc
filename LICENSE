@@ -23,8 +23,9 @@ SOFTWARE.
 ---------------------------------------------------------------------------
 
 Parts of src/ (per-version handling of chat, windows and inventory, the tab
-list, scoreboards and teams, position packets and physics integration) are
-ported from mineflayer (https://github.com/PrismarineJS/mineflayer), which is
+list, scoreboards and teams, position packets and physics integration, and the
+digging, building, crafting, trading, book and enchanting features) are ported
+from mineflayer (https://github.com/PrismarineJS/mineflayer), which is
 distributed under the following license:
 
 The MIT License (MIT)
@@ -48,3 +49,16 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---------------------------------------------------------------------------
+
+src/recipes.ts is a port of prismarine-recipe, src/features/raycast.ts follows
+prismarine-world's RaycastIterator, and the pathfinder's goals and API follow
+mineflayer-pathfinder; all three are PrismarineJS projects under the MIT license
+(Copyright (c) PrismarineJS contributors), with the same terms as above.
+
+The pathfinder's move costs, movement providers and partial-path selection
+follow minecraft-pathfinding
+(https://github.com/Minecraft-Pathfinding/minecraft-pathfinding,
+Copyright (c) GenerelSchwerz), published under the MIT license with the same
+terms as above. Its costs are Baritone's measured movement speeds.

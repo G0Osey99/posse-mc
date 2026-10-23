@@ -71,6 +71,8 @@ export class LazyWorld {
   private readonly decodedOrder = new Set<string>();
   /** Called for every applied block change (motion uses it to notice the floor going away). */
   onBlockChange: ((x: number, y: number, z: number) => void) | null = null;
+  /** Per-position watchers (digging, placing): told the new state id without decoding anything. */
+  private readonly watchers = new Map<string, Set<(stateId: number) => void>>();
   private centerX = 0;
   private centerZ = 0;
   private hasCenter = false;
@@ -81,7 +83,7 @@ export class LazyWorld {
     /** Columns kept around the bot, in chunks. 0 keeps nothing. */
     public radius: number,
     /** Decoded columns kept at most (the rest stay raw); physics needs the few around the bot. */
-    private readonly maxDecoded = 16,
+    public maxDecoded = 16,
     /** Where payloads are kept (the process-wide store, shared by every bot). */
     private readonly store: ChunkStore = chunkStore,
   ) {}
@@ -237,10 +239,28 @@ export class LazyWorld {
    * Applies a block change. Returns the previous state id when it was cheap or `needOld` asked for
    * it (which decodes the column); otherwise undefined. Null when the column isn't loaded.
    */
+  /** Calls `listener` with the new state id whenever the block at a position changes; returns the unwatch function. */
+  watch(x: number, y: number, z: number, listener: (stateId: number) => void): () => void {
+    const k = `${x},${y},${z}`;
+    let set = this.watchers.get(k);
+    if (!set) this.watchers.set(k, (set = new Set()));
+    set.add(listener);
+    return () => {
+      set.delete(listener);
+      if (set.size === 0 && this.watchers.get(k) === set) this.watchers.delete(k);
+    };
+  }
+
   setStateId(x: number, y: number, z: number, stateId: number, needOld: boolean): number | null | undefined {
     const col = this.columns.get(key(x >> 4, z >> 4));
     if (!col) return null;
     this.onBlockChange?.(x, y, z);
+    if (this.watchers.size > 0) {
+      const set = this.watchers.get(`${x},${y},${z}`);
+      if (set) queueMicrotask(() => {
+        for (const listener of [...set]) listener(stateId);
+      });
+    }
     const { minY } = this.dim();
     col.deltas.set(localIndex(x, y, z, minY), stateId);
     const column = col.decoded ?? (needOld ? this.column(col.x, col.z) : null);

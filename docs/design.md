@@ -1,6 +1,8 @@
 # Design: Posse, the fleet-optimized Minecraft client
 
-Status: implemented (2026-10-22); verified against the local fake server for 1.8.9–26.1, not yet against a live server.
+Status: implemented (2026-10-22); 0.3 adds digging, building, crafting, trading, books,
+enchanting, a physics simulator and a pathfinder (2026-10-22), verified against vanilla servers on
+1.8.9, 1.12.2, 1.16.5, 1.20.4, 1.21.4 and 26.1 (`bench/live-*.ts`).
 
 ## Problem
 
@@ -32,9 +34,12 @@ first), so the registry is not a bottleneck.
 - Features mineflayer lacks or leaves to addons: per-bot packet stats, resource-pack auto-accept,
   transfer events, the 1.20.3+ sidebar, screenshots.
 
-Non-goals: pathfinding, crafting, villagers, books, enchanting, digging/building (possible later as
-opt-in plugins). Replacing minecraft-protocol (auth, encryption and compression stay; they are
-battle-tested, and Microsoft auth is the riskiest part to rewrite).
+- Since 0.3: digging, building, crafting, containers and furnaces, trading, books, enchanting, a
+  physics simulator and a pathfinder, without raising the idle cost (see "Actions" and
+  "Pathfinding").
+
+Non-goals: elytra flight, anvils, brewing. Replacing minecraft-protocol (auth, encryption and
+compression stay; they are battle-tested, and Microsoft auth is the riskiest part to rewrite).
 
 ## Architecture (`src/`)
 
@@ -127,6 +132,73 @@ packs (uuid 1.20.3+), `player_loaded` (1.21.4+).
 - Transfers (1.20.5+): cookies are stored and answered (minecraft-protocol answers neither), the
   connection ends on `transfer`, and a follow-up connection sends handshake intent 3.
 
+## Actions (0.3)
+
+Ported from mineflayer's plugins, one file each in `src/features/`: `interact.ts` (right-clicks,
+attacks, arm swings, the 1.19+ block-prediction sequence shared by digging, placing and using
+items), `digging.ts`, `building.ts`, `inventory.ts` (transfer, putAway, open/withdraw/deposit),
+`crafting.ts` with `src/recipes.ts`, `villager.ts`, `books.ts`, `workstations.ts` (containers,
+furnaces, enchanting tables), `raycast.ts`, `effects.ts`.
+
+- **Idle cost unchanged.** Nothing new is decoded until it's used: trade lists, window properties
+  and item-use statuses are listened to only while a window or an action needs them. Effect and
+  attribute packets are decoded for the bot itself only (a peek filter on the entity id), and the
+  pathfinder is created on first access.
+- **Look, then click.** `motion.afterTick()` resolves once a tick has sent the rotation; digging,
+  placing and activating wait for it, so the server sees the rotation before the action like it
+  would from the game (anticheats check this). Placing against blocks that react to a right-click
+  sneaks first.
+- **Predicted breaks.** A finished dig sets the block to air locally (the game does too); the
+  server's block update corrects a refusal. Pillaring predicts the placed block the same way, so
+  the bot lands on it.
+- **1.17+ window races.** Those servers don't confirm clicks. After a click that changes a crafting
+  or trading result, the next click waits for the server's result *and* grid updates; otherwise it
+  is planned on a grid the server is about to overwrite (found against vanilla 1.21.4).
+- Fixes over the libraries they came from: recipes are kept per version (prismarine-recipe keeps the
+  last loaded version in globals, which breaks a multi-version process) and out-shape deltas are
+  computed from the out-shape; 1.20.5+ enchantments are read from item components (so Efficiency
+  counts in dig time); 1.20.5+ trade inputs (an item id and count, not a slot) are read; 26.1's
+  interact-only `use_entity` and separate attack packet are handled; window `close` fires however
+  the window closes, so per-window listeners never leak.
+
+## Physics simulation (0.3)
+
+`src/physics/simulator.ts` runs prismarine-physics on a copy of the player state: `predict(controls,
+ticks)` and `simulateUntil(state, goal, controller)`. Effect levels and armour are read once per
+state instead of every tick. mineflayer-physics-util (the more accurate Botcraft port that
+minecraft-pathfinding uses) is GPL-3.0, so it is neither copied nor depended on: Posse and the
+products built on it stay MIT-compatible.
+
+## Pathfinding (0.3)
+
+`src/pathfinder/`, after minecraft-pathfinding (planning) and mineflayer-pathfinder (API, goals):
+
+- **Costs in ticks** (`costs.ts`, Baritone's measured speeds), so walking, digging with the best tool
+  in the inventory, placing and falling compare as time. The heuristic uses walking speed: paths are
+  at most ~1.3× optimal and far fewer nodes are expanded.
+- **Block table** (`blocks.ts`): flags and collision height per block state, computed once per state
+  and shared per version (minecraft-pathfinding keeps this in statics, which breaks multi-version
+  processes). Slabs, soul sand and farmland count by their real height; fences and walls can't be
+  stood on.
+- **Moves** (`movements.ts`): walk (and bridge), diagonal (no corner cutting), ascend (with a placed
+  step), descend (up to `maxDropDown`, any height into water), down (dig, ladder, water), up
+  (ladder, swim, pillar), parkour (1–3 block gaps, also one up or one down), doors and gates. Each
+  move carries what to break, place and open; a path's own changes are a linked list on the node,
+  so later moves see the blocks earlier ones broke or placed.
+- **Search** (`astar.ts`): binary heap with decrease-key, numeric node keys (packed below 2⁵³, x and
+  z wrapping every 2²¹ blocks), time slices of `tickTimeout` ms with `setImmediate` in between, and
+  Baritone's partial-path choice (best node by progress against cost at several ratios).
+- **Execution** (`pathfinder.ts`): on the fleet ticker after the motion tick, so controls set now
+  apply to the next physics step. Walking steers at the next block centre (sprinting only on
+  straight runs); bridging sneaks to the edge and places against the block underfoot; pillaring
+  looks down, jumps, and places once the feet clear the block; parkour simulates "jump now" each
+  tick and jumps when the landing reaches the target (or the next tick would leave the ground),
+  then chooses forward, coast or brake each tick by simulating the landing. A failed move
+  penalizes that edge for 30 s and the path is replanned; so is a block update on the path's body
+  space or floor, a forced move, or a moved dynamic goal.
+- While pathing, the world keeps more columns decoded (the whole kept area) so searches don't
+  re-inflate them; it goes back afterwards.
+
 ## Screenshots (`posse-mc/view`)
 
 A CPU raycaster, so it works anywhere Node runs, with no GPU.
@@ -165,7 +237,14 @@ deflated (81 columns ≈ 45 KB on the fake terrain). Screenshots render in ~100�
 ## Verification
 
 - Unit tests for decoding, every version branch (packet fixtures generated from minecraft-data),
-  the world store and the view kernel.
+  the world store, the view kernel, every new serverbound packet on ten versions (serialized with
+  minecraft-protocol), recipes, ray casts, goals, the search and move generation on synthetic
+  worlds, and the simulator.
+- `bench/live-features.ts` and `bench/live-pathfinder.ts` run against Mojang's vanilla server
+  (`bench/vanilla.ts` downloads and runs it; `--accept-eula`): dig, place (also against a chest),
+  craft (2×2 and table), chests, furnaces, books, enchanting, trading, eating, ray casts, doors;
+  and walking, going around and through walls, stairs, drops, parkour onto 1×1 pillars, bridging,
+  pillaring, digging down, doors, swimming, ladders, following, no-path and long trips.
 - `bench/`: a local fake server (minecraft-protocol `createServer`, offline auth)
   for each tested version that streams chunks, moving entities, chat, tab list, scoreboard and a
   menu window; a benchmark connects N bots of mineflayer or Posse and reports CPU, event-loop delay

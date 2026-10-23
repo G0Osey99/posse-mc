@@ -6,7 +6,9 @@ built to run dozens of bots in one process. It can also render **first-person sc
 each bot sees, with the game's own textures.
 
 > Early release (0.x): verified against a local test server on 1.8.9, 1.12.2, 1.16.5, 1.18.2,
-> 1.19.4, 1.20.4, 1.21.4 and 26.1. Reports from live servers are welcome.
+> 1.19.4, 1.20.4, 1.21.4 and 26.1, and digging, building, crafting, trading, books, enchanting and
+> pathfinding against vanilla servers on 1.8.9, 1.12.2, 1.16.5, 1.20.4, 1.21.4 and 26.1. Reports
+> from live servers are welcome.
 
 ## Why
 
@@ -84,20 +86,32 @@ Besides minecraft-protocol's connection options (`host`, `port`, `username`, `au
 The mineflayer-compatible slice:
 
 - **State**: `username`, `version`, `registry`, `game` (dimension, minY, height, gameMode…),
-  `entity`, `entities`, `players`, `health`, `food`, `isAlive`, `time`, `isRaining`,
-  `scoreboard` (`sidebar`, `list`, `belowName`), `scoreboards`, `teams`, `inventory`,
-  `currentWindow`, `heldItem`, `quickBarSlot`, `physicsEnabled`.
+  `entity` (with `effects`), `entities`, `players`, `health`, `food`, `isAlive`, `experience`,
+  `time`, `isRaining`, `scoreboard` (`sidebar`, `list`, `belowName`), `scoreboards`, `teams`,
+  `inventory`, `currentWindow`, `heldItem`, `quickBarSlot`, `usingHeldItem`, `targetDigBlock`,
+  `physicsEnabled`, `pathfinder`.
 - **Methods**: `chat`, `whisper`, `tabComplete`, `clickWindow`, `closeWindow`, `moveSlotItem`,
-  `equip`, `unequip`, `setQuickBarSlot`, `activateItem`, `deactivateItem`, `blockAt`, `look`,
-  `lookAt`, `setControlState`, `getControlState`, `clearControlStates`, `respawn`,
-  `acceptResourcePack`, `denyResourcePack`, `quit`, `end`.
-- **Events**: `login`, `spawn`, `respawn`, `game`, `death`, `health`, `kicked`, `end`, `error`,
-  `message`, `messagestr`, `actionBar`, `title`, `title_times`, `title_clear`, `windowOpen`,
-  `windowClose`, `heldItemChanged`, `playerJoined`, `playerUpdated`, `playerLeft`, `entitySpawn`,
-  `entityGone`, `entityMoved`, `playerCollect`, `blockUpdate`, `chunkColumnLoad`,
-  `chunkColumnUnload`, `scoreboardCreated`, `scoreUpdated`, `scoreRemoved`, `scoreboardPosition`,
-  `teamCreated`, `teamUpdated`, `teamRemoved`, `time`, `rain`, `resourcePack`, `forcedMove`,
-  `move`, `physicsTick`, `transfer`.
+  `putAway`, `putSelectedItemRange`, `transfer`, `toss`, `tossStack`, `equip`, `unequip`,
+  `setQuickBarSlot`, `activateItem`, `deactivateItem`, `consume`, `blockAt`, `blockAtCursor`,
+  `blockInSight`, `entityAtCursor`, `canSeeBlock`, `look`, `lookAt`, `setControlState`,
+  `getControlState`, `clearControlStates`, `swingArm`, `attack`, `useOn`, `activateBlock`,
+  `activateEntity`, `activateEntityAt`, `dig`, `stopDigging`, `canDigBlock`, `digTime`,
+  `placeBlock`, `openBlock`, `openEntity`, `openContainer`, `openChest`, `openFurnace`,
+  `openEnchantmentTable`, `openVillager`, `trade`, `craft`, `recipesFor`, `recipesAll`,
+  `writeBook`, `signBook`, `respawn`, `acceptResourcePack`, `denyResourcePack`, `quit`, `end`.
+- **Events**: `login`, `spawn`, `respawn`, `game`, `death`, `health`, `experience`, `kicked`,
+  `end`, `error`, `message`, `messagestr`, `actionBar`, `title`, `title_times`, `title_clear`,
+  `windowOpen`, `windowClose`, `heldItemChanged`, `playerJoined`, `playerUpdated`, `playerLeft`,
+  `entitySpawn`, `entityGone`, `entityMoved`, `entityEffect`, `entityEffectEnd` (the bot's own),
+  `playerCollect`, `blockUpdate`, `blockPlaced`, `diggingCompleted`, `diggingAborted`,
+  `chunkColumnLoad`, `chunkColumnUnload`, `scoreboardCreated`, `scoreUpdated`, `scoreRemoved`,
+  `scoreboardPosition`, `teamCreated`, `teamUpdated`, `teamRemoved`, `time`, `rain`,
+  `resourcePack`, `forcedMove`, `move`, `physicsTick`, `transfer`, and the pathfinder's
+  `goal_reached`, `goal_updated`, `path_update`, `path_reset`, `path_stop`.
+
+Windows opened with `openBlock` / `openEntity` (and the helpers built on them) have `close()`,
+`withdraw(itemType, metadata, count)` and `deposit(itemType, metadata, count)`, and emit `close`
+however they close.
 
 Posse extras:
 
@@ -121,7 +135,87 @@ Posse extras:
 - Window titles are normalized to JSON text components in every version, and the 1.20.3+
   scoreboard (scores without an action, per-score display names) is supported.
 
-Not included (yet): pathfinding, digging and building, crafting, villagers, books, enchanting.
+## Digging, building, crafting, trading
+
+```ts
+import { createBot, Vec3 } from 'posse-mc';
+
+// Dig: looks at the face it can see, waits the dig time (tool, enchantments, effects, water…).
+await bot.dig(bot.blockAt(new Vec3(10, 64, 3))!);
+
+// Place the held block on top of another one (sneaks when clicking chests, doors, levers…).
+await bot.placeBlock(bot.blockAt(new Vec3(10, 63, 3))!, new Vec3(0, 1, 0));
+
+// Craft: in the 2×2 grid, or at a crafting table.
+const [planks] = bot.recipesFor(bot.registry.itemsByName.oak_planks.id, null, 1, null);
+await bot.craft(planks!, 4);
+const table = bot.blockAt(new Vec3(12, 64, 3))!;
+const [pickaxe] = bot.recipesFor(bot.registry.itemsByName.iron_pickaxe.id, null, 1, table);
+await bot.craft(pickaxe!, 1, table);
+
+// Containers, furnaces, enchanting tables, villagers (track them with `entities: 'all'`).
+const chest = await bot.openContainer(bot.blockAt(new Vec3(8, 64, 1))!);
+await chest.deposit(bot.registry.itemsByName.cobblestone.id, null, 32);
+await chest.close();
+const villager = await bot.openVillager(Object.values(bot.entities).find((e) => e.name === 'villager')!);
+await villager.trade(0, 1);
+
+// Books.
+await bot.writeBook(36, ['page one', 'page two']);
+await bot.signBook(36, ['page one'], bot.username, 'Title');
+```
+
+Interactions look at their target and wait for the rotation to reach the server before clicking,
+so the server (and its anticheat) sees what the game would. Verified against vanilla servers on
+1.8.9, 1.12.2, 1.16.5, 1.20.4, 1.21.4 and 26.1 (`bench/live-features.ts`).
+
+## Pathfinding
+
+```ts
+import { goals } from 'posse-mc';
+
+await bot.pathfinder.goto(new goals.GoalBlock(100, 64, -20));
+await bot.pathfinder.goto(new goals.GoalNear(x, y, z, 2));
+bot.pathfinder.setGoal(new goals.GoalFollow(bot.players.Steve!.entity!, 3), true); // keeps following
+bot.pathfinder.setMovements({ canDig: false, maxDropDown: 3, scaffoldingBlocks: ['cobblestone'] });
+bot.pathfinder.stop();
+```
+
+An A* planner with costs in game ticks (walking, sprinting, swimming, digging with the best tool in
+the inventory, placing) and moves for walking and diagonals, jumping up a block, dropping down,
+digging down, climbing ladders and vines, swimming, pillaring up, bridging gaps, parkour over 1–3
+block gaps (jumps timed with the physics simulator, mid-air braking to land on small targets) and
+opening doors and gates. It plans in small time slices so a fleet keeps running, uses partial
+paths when the goal is beyond the kept chunks, and replans when blocks on the path change, a move
+fails, or a followed entity moves.
+
+- Goals (mineflayer-pathfinder's names): `GoalBlock`, `GoalNear`, `GoalXZ`, `GoalNearXZ`, `GoalY`,
+  `GoalGetToBlock`, `GoalReachBlock` (`GoalBreakBlock`, `GoalLookAtBlock`), `GoalFollow`,
+  `GoalInvert`, `GoalCompositeAny`, `GoalCompositeAll`, or your own `Goal` subclass.
+- Settings (`bot.pathfinder.movements`): `canDig`, `canPlace`, `canOpenDoors`, `allowParkour`,
+  `allowSprinting`, `allowDiagonal`, `allow1by1Towers`, `maxDropDown`, `dontCreateFlow`,
+  `dontMineUnderFallingBlock`, `scaffoldingBlocks`, `blocksCantBreak`, `blocksToAvoid`, cost knobs,
+  and exclusion areas (`(pos, blockName) => extraCost`) for stepping, breaking and placing.
+- `bot.pathfinder.getPathTo(goal)` plans without moving; `thinkTimeout`, `tickTimeout` (ms per
+  slice) and `searchRadius` bound the search; `bot.pathfinder.debug = console.log` explains failed
+  moves. `goto` rejects with `NoPathError` (unreachable, or stuck) or `PathStoppedError` (stopped,
+  goal replaced, disconnected, `timeout` option).
+- A bot only knows the chunks within `worldRadius` (default 4); long trips are planned in stretches.
+  Raise it for longer single plans.
+- Elytra flight is not included.
+
+## Physics simulation
+
+`bot.simulator` predicts movement without moving the bot (prismarine-physics on a copy of the
+player state, with the bot's effects and armour):
+
+```ts
+const states = bot.simulator.predict({ forward: true, sprint: true, jump: true }, 20);
+const landing = bot.simulator.simulateUntil(bot.simulator.state(), (s, tick) => tick > 0 && s.onGround);
+```
+
+The bot's own effects (`bot.entity.effects`) and movement-speed attribute are tracked for physics
+and dig times; effect and attribute packets of other entities are never decoded.
 
 ## Screenshots
 
@@ -156,6 +250,9 @@ npm run bench -- --client posse --bots 30 --version 1.18.2 --seconds 60
 npm run bench -- --client mineflayer --bots 30 --version 1.18.2 --seconds 60
 npx tsx bench/view-demo.ts ./out 1.18.2   # render a synthetic scene
 npx tsx bench/shot.ts 1.18.2 ./shot.png   # a bot on the fake server, rendered
+# Against real vanilla servers (downloads Mojang's server jar; you accept the Minecraft EULA):
+npx tsx bench/live-features.ts --accept-eula --versions 1.21.4
+npx tsx bench/live-pathfinder.ts --accept-eula --versions 1.21.4
 ```
 
 `bench/` holds the fake server (minecraft-protocol `createServer`, offline auth), the per-version
@@ -163,6 +260,9 @@ verifier and the benchmark (CPU, event-loop delay, memory, optional CPU profile)
 
 ## License
 
-MIT. Parts of the per-version protocol handling are ported from
-[mineflayer](https://github.com/PrismarineJS/mineflayer) (MIT); see [LICENSE](LICENSE).
+MIT. Parts of the per-version protocol handling and the digging, building, crafting, trading,
+book and enchanting features are ported from [mineflayer](https://github.com/PrismarineJS/mineflayer)
+(MIT); the pathfinder follows [minecraft-pathfinding](https://github.com/Minecraft-Pathfinding/minecraft-pathfinding)
+and [mineflayer-pathfinder](https://github.com/PrismarineJS/mineflayer-pathfinder) (MIT); see
+[LICENSE](LICENSE).
 Minecraft is a trademark of Mojang Synergies AB; Posse is not affiliated with Mojang or Microsoft.

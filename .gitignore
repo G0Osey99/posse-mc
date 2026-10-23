@@ -3,3 +3,5 @@ dist/
 *.cpuprofile
 *.log
 .DS_Store
+.vanilla/
+*.tgz

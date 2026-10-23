@@ -7,6 +7,8 @@ import type { Entity } from 'prismarine-entity';
 import type { Item } from 'prismarine-item';
 import type { Window } from 'prismarine-windows';
 import type { Vec3 } from 'vec3';
+import type { Goal } from './pathfinder/goals.js';
+import type { PathResult, ResetReason } from './pathfinder/pathfinder.js';
 
 export type { Block, ChatMessage, Entity, Item, Window, Client };
 
@@ -193,6 +195,22 @@ export interface PosseBotEvents {
   forcedMove: () => void;
   move: () => void;
   physicsTick: () => void;
+  experience: () => void;
+  entityEffect: (entity: Entity, effect: { id: number; amplifier: number; duration: number }) => void;
+  entityEffectEnd: (entity: Entity, effect: { id: number; amplifier: number; duration: number }) => void;
+  diggingCompleted: (block: Block) => void;
+  diggingAborted: (block: Block) => void;
+  blockPlaced: (oldBlock: Block | null, newBlock: Block) => void;
+  /** Pathfinder: the goal was reached. */
+  goal_reached: (goal: Goal) => void;
+  /** Pathfinder: a new goal, or a dynamic goal moved. */
+  goal_updated: (goal: Goal, dynamic: boolean) => void;
+  /** Pathfinder: a (possibly partial) path was computed. */
+  path_update: (result: PathResult) => void;
+  /** Pathfinder: the path was dropped and will be recomputed. */
+  path_reset: (reason: ResetReason) => void;
+  /** Pathfinder: stopped (no goal any more). */
+  path_stop: () => void;
   /** An explosion the server reported (any size, anywhere in view). */
   explosion: (explosion: ExplosionInfo) => void;
   /** Server-initiated transfer to another server (1.20.5+). */

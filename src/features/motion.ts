@@ -26,6 +26,12 @@ export interface MotionApi {
   setControlState(control: ControlState, state: boolean): void;
   clearControlStates(): void;
   look(yaw: number, pitch: number, force: boolean): Promise<void>;
+  /**
+   * Resolves once the next tick has sent the bot's position and rotation (at once when nothing is
+   * being sent: before the server placed the bot, while dead, or outside the play state). Actions
+   * wait for it after a look so the server sees the rotation before the click.
+   */
+  afterTick(): Promise<void>;
   stop(): void;
 }
 
@@ -87,6 +93,7 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
   let deadTicks = 21;
   let unsubscribe: (() => void) | null = null;
   let pendingLook: { resolve: () => void } | null = null;
+  let tickWaiters: Array<() => void> = [];
   let respawnAt = 0;
   /** Bumped when the connection's world ends, so a delayed answer from before never resubscribes. */
   let generation = 0;
@@ -139,6 +146,10 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
       pendingLook?.resolve();
       return new Promise((resolve) => (pendingLook = { resolve }));
     },
+    afterTick() {
+      if (!active || !unsubscribe || client.state !== 'play') return Promise.resolve();
+      return new Promise((resolve) => tickWaiters.push(resolve));
+    },
     stop() {
       unsubscribe?.();
       unsubscribe = null;
@@ -146,7 +157,15 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
       generation++;
       pendingLook?.resolve();
       pendingLook = null;
+      flushTickWaiters();
     },
+  };
+
+  const flushTickWaiters = (): void => {
+    if (tickWaiters.length === 0) return;
+    const waiters = tickWaiters;
+    tickWaiters = [];
+    for (const resolve of waiters) resolve();
   };
 
   const write = (name: string, onGround: boolean): void => {
@@ -255,11 +274,16 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
   };
 
   const tick = (): void => {
-    if (!active || client.state !== 'play' || !bot.entity?.position) return;
+    if (!active || client.state !== 'play' || !bot.entity?.position) {
+      flushTickWaiters();
+      return;
+    }
     try {
       if (needsPhysics()) simulate();
       updatePosition(performance.now());
+      flushTickWaiters();
     } catch (err) {
+      flushTickWaiters();
       // Reported (at most once a minute), not swallowed by the fleet ticker.
       const now = Date.now();
       if (now - lastErrorAt >= 60_000) {
@@ -357,11 +381,16 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
   bot.on('death', () => {
     active = false;
     respawnAt = Date.now();
+    flushTickWaiters();
   });
-  bot.on('respawn', () => (active = false));
+  bot.on('respawn', () => {
+    active = false;
+    flushTickWaiters();
+  });
   client.on('login', () => {
     active = false;
     generation++;
+    flushTickWaiters();
     bot.entity.position = new Vec3(0, 0, 0);
     bot.entity.velocity = new Vec3(0, 0, 0);
   });
@@ -369,6 +398,7 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
     client.on('start_configuration', () => {
       active = false;
       generation++;
+      flushTickWaiters();
     });
 
   return api;

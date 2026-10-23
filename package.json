@@ -1,7 +1,7 @@
 {
   "name": "posse-mc",
-  "version": "0.2.0",
-  "description": "A fleet-optimized Minecraft bot client (1.8.9 to latest) with a mineflayer-compatible API and first-person screenshots",
+  "version": "0.3.0",
+  "description": "A fleet-optimized Minecraft bot client (1.8.9 to latest) with a mineflayer-compatible API: digging, building, crafting, trading, pathfinding and first-person screenshots",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -38,7 +38,11 @@
     "mineflayer",
     "minecraft-protocol",
     "fleet",
-    "screenshot"
+    "screenshot",
+    "pathfinder",
+    "pathfinding",
+    "crafting",
+    "digging"
   ],
   "author": "G0Osey99",
   "license": "MIT",
