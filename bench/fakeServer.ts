@@ -121,6 +121,13 @@ export async function startFakeServer(options: FakeServerOptions): Promise<FakeS
   const version = mcData.version.minecraftVersion as string;
   const filler = new PacketFiller(mcData.protocol as never);
   const atLeast = (v: string): boolean => mcData.version['>='](v);
+  // 26.1+ sends the time per world clock (id 0: the overworld's).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the protocol JSON
+  const clocked = JSON.stringify((mcData.protocol as any).play?.toClient?.types?.packet_update_time ?? '').includes('clockUpdates');
+  const timePacket = (age: bigint) =>
+    clocked
+      ? { age, clockUpdates: [{ id: 0, totalTicks: age, partialTick: 0, rate: 1 }] }
+      : { age, time: age, tickDayTime: true };
   const Item = prismarineItem(version as never);
   const states = blockStates(mcData);
 
@@ -520,7 +527,7 @@ export async function startFakeServer(options: FakeServerOptions): Promise<FakeS
       dz: 0,
     });
     send(client, 'update_health', { health: 20, food: 20, foodSaturation: 5 });
-    send(client, 'update_time', { age: 6000n, time: 6000n, tickDayTime: true });
+    send(client, 'update_time', timePacket(6000n));
     const invSlots = atLeast('1.9') ? 46 : 45;
     send(client, 'window_items', {
       windowId: 0,
@@ -727,7 +734,7 @@ export async function startFakeServer(options: FakeServerOptions): Promise<FakeS
   timers.push(
     setInterval(() => {
       age += 20n;
-      broadcast('update_time', { age, time: age, tickDayTime: true });
+      broadcast('update_time', timePacket(age));
     }, 1000),
   );
 

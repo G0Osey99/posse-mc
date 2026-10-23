@@ -61,6 +61,22 @@ export function parseGameMode(bits: number): string {
   return GAME_MODES[bits & 0b11]!;
 }
 
+/**
+ * 26.1+ `update_time`: the time of the bot's dimension's clock (the End has its own; every other
+ * dimension uses the overworld's), or of the only clock sent. Null when none of them applies.
+ * `clocks` are the world clock names by registry id.
+ */
+export function clockTime(
+  updates: readonly { id: number; totalTicks: bigint | number; rate: number }[],
+  clocks: readonly string[],
+  dimension: string,
+): { time: number; cycle: boolean } | null {
+  const want = dimension.endsWith('the_end') ? 'minecraft:the_end' : 'minecraft:overworld';
+  const update = updates.find((u) => clocks[u.id] === want) ?? (updates.length === 1 ? updates[0] : undefined);
+  if (!update) return null;
+  return { time: Number(update.totalTicks), cycle: update.rate > 0 };
+}
+
 /* eslint-disable @typescript-eslint/no-explicit-any -- protocol packets are untyped JSON */
 type Packet = any;
 
@@ -343,7 +359,12 @@ export class PosseBot extends EventEmitter {
     const brandChannel = this.brandChannel;
     client.registerChannel(brandChannel, ['string', []]);
 
-    client.on('registry_data', (packet: Packet) => (this.registry as any).loadDimensionCodec(packet.codec || packet));
+    // 26.1+: the world clocks `update_time` refers to by id (registry order: overworld, the_end).
+    let clocks: string[] = ['minecraft:overworld', 'minecraft:the_end'];
+    client.on('registry_data', (packet: Packet) => {
+      if (packet.id === 'minecraft:world_clock' && Array.isArray(packet.entries)) clocks = packet.entries.map((e: Packet) => String(e.key));
+      (this.registry as any).loadDimensionCodec(packet.codec || packet);
+    });
 
     client.on('login', (packet: Packet) => {
       this.applySpawnInfo(packet.worldState || packet);
@@ -388,8 +409,18 @@ export class PosseBot extends EventEmitter {
 
     client.on('update_time', (packet: Packet) => {
       const age = Number(packet.age);
-      let time = Number(packet.time);
-      const cycle = packet.tickDayTime !== undefined ? Boolean(packet.tickDayTime) : time >= 0;
+      let time: number;
+      let cycle: boolean;
+      if (Array.isArray(packet.clockUpdates)) {
+        // 26.1+: one entry per world clock; the day is the clock of the bot's dimension.
+        const clock = clockTime(packet.clockUpdates, clocks, this.game.dimension);
+        this.time.age = age;
+        if (!clock) return;
+        ({ time, cycle } = clock);
+      } else {
+        time = Number(packet.time);
+        cycle = packet.tickDayTime !== undefined ? Boolean(packet.tickDayTime) : time >= 0;
+      }
       time = Math.abs(time);
       this.time.age = age;
       this.time.doDaylightCycle = cycle;

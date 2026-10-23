@@ -286,6 +286,9 @@ npx tsx bench/shot.ts 1.18.2 ./shot.png   # a bot on the fake server, rendered
 # Against real vanilla servers (downloads Mojang's server jar; you accept the Minecraft EULA):
 npx tsx bench/live-features.ts --accept-eula --versions 1.21.4
 npx tsx bench/live-pathfinder.ts --accept-eula --versions 1.21.4
+# A Velocity proxy (PaperMC download) in front of two servers: world, time, inventory and pickup
+# before and after /server (1.20.2+ goes back through configuration)
+npx tsx bench/live-proxy.ts --accept-eula --versions 26.1
 ```
 
 `bench/` holds the fake server (minecraft-protocol `createServer`, offline auth), the per-version

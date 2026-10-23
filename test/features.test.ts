@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { clockTime } from '../src/bot.js';
 import { installChat, parseComponent } from '../src/features/chat.js';
 import { tpsFrom } from '../src/features/serverHealth.js';
 import { chatLoader, connectionRegistry } from '../src/registry.js';
@@ -255,5 +256,24 @@ describe('cast aiming', () => {
 
   it('refuses targets out of reach', () => {
     expect(castAngles(new Vec3(0, 65.62, 0), new Vec3(0, 64, 40), false)).toBeNull();
+  });
+});
+
+describe('26.1 world clocks', () => {
+  const clocks = ['minecraft:overworld', 'minecraft:the_end'];
+  const updates = [
+    { id: 0, totalTicks: 30_000n, partialTick: 0, rate: 1 },
+    { id: 1, totalTicks: 7_000n, partialTick: 0, rate: 0 },
+  ];
+
+  it("reads the day from the bot's dimension's clock", () => {
+    expect(clockTime(updates, clocks, 'overworld')).toEqual({ time: 30_000, cycle: true });
+    expect(clockTime(updates, clocks, 'the_nether')).toEqual({ time: 30_000, cycle: true });
+    expect(clockTime(updates, clocks, 'the_end')).toEqual({ time: 7_000, cycle: false });
+  });
+
+  it('takes the only clock sent, or none', () => {
+    expect(clockTime([updates[1]!], ['minecraft:a', 'minecraft:b'], 'overworld')).toEqual({ time: 7_000, cycle: false });
+    expect(clockTime([], clocks, 'overworld')).toBeNull();
   });
 });

@@ -255,7 +255,8 @@ export class ViewRenderer {
       camera,
       region: scene.region,
       entities,
-      timeOfDay: scene.timeOfDay,
+      // A time the client couldn't read draws as noon, not as a black night.
+      timeOfDay: finite(scene.timeOfDay, 6000),
       raining: scene.raining,
       dimension: scene.dimension,
       ...versionTraits(scene.version),
