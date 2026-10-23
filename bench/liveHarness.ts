@@ -104,6 +104,7 @@ export async function connect(server: VanillaServer, username: string, extra: Re
     ...extra,
   });
   bot.on('error', (err) => console.log(`  [${username}] error: ${err.message}`));
+  /* eslint-disable @typescript-eslint/no-explicit-any -- packet tracing reads untyped packets */
   if (process.env.POSSE_TRACE_MOVES) {
     const c = bot._client as any;
     const write = c.write.bind(c);
@@ -129,7 +130,8 @@ export async function connect(server: VanillaServer, username: string, extra: Re
       }
       write(name, p);
     };
-  }
+  }  /* eslint-enable @typescript-eslint/no-explicit-any */
+
   if (process.env.POSSE_DEBUG) bot.pathfinder.debug = (m) => console.log(`[pathfinder] ${m}`);
   bot.on('kicked', (reason) => console.log(`  [${username}] kicked: ${typeof reason === 'string' ? reason : JSON.stringify(reason)}`));
   await new Promise<void>((resolve, reject) => {
