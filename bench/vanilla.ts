@@ -5,7 +5,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import path from 'node:path';
 
@@ -25,6 +25,12 @@ export interface VanillaOptions {
   properties?: Record<string, string | number | boolean>;
   log?: (line: string) => void;
   java?: string;
+  /** Run this server jar (e.g. Paper) instead of Mojang's. */
+  jar?: string;
+  /** Plugin jars copied into `plugins/` (with `jar` a Bukkit server). */
+  plugins?: string[];
+  /** World folder name (default: the version). */
+  name?: string;
 }
 
 export interface VanillaServer {
@@ -80,10 +86,14 @@ export async function serverJar(version: string, dir: string): Promise<string> {
 export async function startVanilla(options: VanillaOptions): Promise<VanillaServer> {
   if (!options.acceptEula) throw new Error('Running a vanilla server requires accepting the Minecraft EULA (acceptEula: true)');
   const { version } = options;
-  const jar = await serverJar(version, options.dir);
-  const worldDir = path.join(options.dir, 'servers', version);
+  const jar = options.jar ?? (await serverJar(version, options.dir));
+  const worldDir = path.join(options.dir, 'servers', options.name ?? version);
   if (options.freshWorld ?? true) await rm(worldDir, { recursive: true, force: true });
   await mkdir(worldDir, { recursive: true });
+  if (options.plugins?.length) {
+    await mkdir(path.join(worldDir, 'plugins'), { recursive: true });
+    for (const plugin of options.plugins) await copyFile(plugin, path.join(worldDir, 'plugins', path.basename(plugin)));
+  }
   const port = options.port ?? (await freePort());
   const flat = options.flat ?? true;
   // Level types are namespaced from 1.19 (`minecraft:flat`); before, `flat` / `default`.

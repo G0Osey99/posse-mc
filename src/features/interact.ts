@@ -140,6 +140,10 @@ export function installInteract(bot: PosseBot): InteractApi {
     );
     // The swing follows the click, like the game.
     if (options.swing ?? true) swingArm(hand === 1 ? 'left' : 'right');
+    // Keep the rotation until the tick that sends the click has sent its movement too: before 1.9
+    // anticheats (Grim's RotationPlace) check a click against the rotation that follows it, and a
+    // caller turning away at once (the pathfinder after a bridge block) would point elsewhere.
+    if (options.forceLook !== 'ignore') await bot.afterTick();
   };
 
   const activateBlock: InteractApi['activateBlock'] = async (block, direction = new Vec3(0, 1, 0), cursorPos) => {

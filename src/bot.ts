@@ -803,7 +803,7 @@ export class PosseBot extends EventEmitter {
   }
 
   lookAt(point: Vec3, force = true): Promise<void> {
-    const eye = this.entity.position.offset(0, 1.62, 0);
+    const eye = this.entity.position.offset(0, (this.entity as Entity & { eyeHeight?: number }).eyeHeight ?? 1.62, 0);
     const delta = point.minus(eye);
     const yaw = Math.atan2(-delta.x, -delta.z);
     const pitch = Math.atan2(delta.y, Math.sqrt(delta.x * delta.x + delta.z * delta.z));

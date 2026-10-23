@@ -4,9 +4,12 @@
 //   tsx bench/live-features.ts --accept-eula [--versions 1.21.4,1.12.2] [--dir ./.vanilla] [--only dig,place]
 //
 // --accept-eula means you accept the Minecraft EULA (https://aka.ms/MinecraftEULA).
+import { readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { Vec3 } from 'vec3';
 import { createBot, type PosseBot } from '../src/index.js';
-import { startVanilla, type VanillaServer } from './vanilla.js';
+import { startVanilla, type VanillaOptions, type VanillaServer } from './vanilla.js';
+import { grimJar, paperJar, parseGrimFlag, type GrimFlag } from './paperGrim.js';
 
 const DEFAULT_VERSIONS = ['1.8.9', '1.12.2', '1.16.5', '1.20.4', '1.21.4', '26.1'];
 
@@ -101,6 +104,32 @@ export async function connect(server: VanillaServer, username: string, extra: Re
     ...extra,
   });
   bot.on('error', (err) => console.log(`  [${username}] error: ${err.message}`));
+  if (process.env.POSSE_TRACE_MOVES) {
+    const c = bot._client as any;
+    const write = c.write.bind(c);
+    c.write = (name: string, p: any) => {
+      if (/^(position|position_look|look|flying|entity_action)$/.test(name)) {
+        const k = Object.entries((bot as any).motion?.controls ?? {}).filter(([, v]) => v).map(([n]) => n[0]).join('');
+        console.log(`  [${Date.now() % 100000}] ${name} ${p.x?.toFixed(4) ?? ''} ${p.y?.toFixed(4) ?? ''} ${p.z?.toFixed(4) ?? ''} ${p.yaw !== undefined ? `yaw ${p.yaw.toFixed(2)}` : ''} ${p.onGround ?? ''} ${p.actionId ?? ''} keys ${k} v ${bot.entity.velocity.x.toFixed(3)},${bot.entity.velocity.y.toFixed(3)},${bot.entity.velocity.z.toFixed(3)}`);
+      }
+      write(name, p);
+    };
+  }
+  if (process.env.POSSE_TRACE_PLACE) {
+    const c = bot._client as any;
+    const write = c.write.bind(c);
+    let after = 0;
+    c.write = (name: string, p: any) => {
+      if (name === 'block_place') {
+        console.log(`  [place] ${JSON.stringify(p.location)} dir ${p.direction} cursor ${p.cursorX},${p.cursorY},${p.cursorZ} at ${bot.entity.position} eye ${(bot.entity as any).eyeHeight} yaw ${bot.entity.yaw.toFixed(3)} pitch ${bot.entity.pitch.toFixed(3)}`);
+        after = 2;
+      } else if (after > 0 && /position|look|flying/.test(name)) {
+        console.log(`  [after] ${name} ${p.x?.toFixed(3) ?? ''} ${p.y?.toFixed(3) ?? ''} ${p.z?.toFixed(3) ?? ''} yaw ${p.yaw?.toFixed(2) ?? '-'} pitch ${p.pitch?.toFixed(2) ?? '-'}`);
+        after--;
+      }
+      write(name, p);
+    };
+  }
   if (process.env.POSSE_DEBUG) bot.pathfinder.debug = (m) => console.log(`[pathfinder] ${m}`);
   bot.on('kicked', (reason) => console.log(`  [${username}] kicked: ${typeof reason === 'string' ? reason : JSON.stringify(reason)}`));
   await new Promise<void>((resolve, reject) => {
@@ -119,15 +148,28 @@ export async function connect(server: VanillaServer, username: string, extra: Re
 export async function runScenarios(
   version: string,
   scenarios: Record<string, Scenario>,
-  options: { dir: string; only?: string[]; flat?: boolean; verbose?: boolean; botOptions?: Record<string, unknown>; scenarioTimeout?: number },
+  options: { dir: string; only?: string[]; flat?: boolean; verbose?: boolean; botOptions?: Record<string, unknown>; scenarioTimeout?: number; grim?: boolean },
 ): Promise<ScenarioResult[]> {
-  const server = await startVanilla({
-    version,
-    dir: options.dir,
-    acceptEula: true,
-    flat: options.flat ?? true,
-    log: options.verbose ? (l) => console.log(`  [server] ${l}`) : undefined,
-  });
+  // With --grim: Paper plus GrimAC, and every flag Grim prints fails the scenario it came in.
+  const flags: GrimFlag[] = [];
+  let server: VanillaServer;
+  const log = (l: string): void => {
+    const flag = options.grim ? parseGrimFlag(l) : null;
+    if (flag) flags.push(flag);
+    if (options.verbose || flag) console.log(`  [server] ${l}`);
+  };
+  const base: VanillaOptions = { version, dir: options.dir, acceptEula: true, flat: options.flat ?? true, log };
+  if (options.grim) {
+    const [paper, grim] = await Promise.all([paperJar(version, options.dir), grimJar(version, options.dir)]);
+    console.log(`  ${path.basename(paper)} + GrimAC ${grim.version}`);
+    server = await startVanilla({ ...base, jar: paper, plugins: [grim.file], name: `paper-grim-${version}` });
+    // Every violation, not just the ones past the alert threshold.
+    const config = path.join(options.dir, 'servers', `paper-grim-${version}`, 'plugins', 'GrimAC', 'config.yml');
+    await writeFile(config, (await readFile(config, 'utf8')).replace(/verbose:\n(\s+)print-to-console: false/, 'verbose:\n$1print-to-console: true'));
+    await server.run('grim reload', /reload/i, 15_000).catch(() => undefined);
+  } else {
+    server = await startVanilla(base);
+  }
   const results: ScenarioResult[] = [];
   const name = 'PosseLive';
   let bot: PosseBot | null = null;
@@ -177,8 +219,12 @@ export async function runScenarios(
         },
         log: (m) => options.verbose && console.log(`    ${m}`),
       };
+      const flagsBefore = flags.length;
       try {
-        await Promise.race([scenario(ctx), sleep(options.scenarioTimeout ?? 120_000).then(() => Promise.reject(new Error('scenario timed out')))]);
+        await Promise.race([scenario(ctx), sleep(options.scenarioTimeout ?? 240_000).then(() => Promise.reject(new Error('scenario timed out')))]);
+        await sleep(options.grim ? 1000 : 0); // late alerts
+        const raised = flags.slice(flagsBefore);
+        if (raised.length) throw new Error(`Grim flagged ${[...new Set(raised.map((f) => f.check))].join(', ')} (${raised.length}×)`);
         results.push({ name: scenarioName, ok: true, ms: Date.now() - start });
         console.log(`  ✓ ${scenarioName} (${Date.now() - start} ms)`);
       } catch (err) {
@@ -208,11 +254,12 @@ export async function main(scenarios: Record<string, Scenario>, defaults: { flat
   const versions = typeof a.versions === 'string' ? a.versions.split(',') : DEFAULT_VERSIONS;
   const dir = typeof a.dir === 'string' ? a.dir : '.vanilla';
   const only = typeof a.only === 'string' ? a.only.split(',') : undefined;
+  const grim = Boolean(a.grim);
   let failed = 0;
   for (const version of versions) {
     console.log(`${version}`);
     try {
-      const results = await runScenarios(version, scenarios, { dir, only, flat: defaults.flat, verbose: Boolean(a.verbose) });
+      const results = await runScenarios(version, scenarios, { dir, only, flat: defaults.flat, verbose: Boolean(a.verbose), grim });
       failed += results.filter((r) => !r.ok).length;
     } catch (err) {
       failed++;

@@ -134,12 +134,13 @@ export function installFishing(bot: PosseBot): FishingApi {
   const fish = async (options: FishOptions = {}): Promise<void> => {
     cancel?.(new Error('Fishing cancelled: fish() was called again'));
     if (options.at) {
-      const eye = bot.entity.position.offset(0, 1.62, 0);
+      const eye = bot.entity.position.offset(0, (bot.entity as Entity & { eyeHeight?: number }).eyeHeight ?? 1.62, 0);
       const look = castAngles(eye, options.at, legacyCast);
       if (!look) throw new Error(`Fishing: ${options.at} is out of casting reach`);
       await bot.look(look.yaw, look.pitch, true);
-      await bot.afterTick();
     }
+    // The server casts along the last rotation it got: a look set just before must go out first.
+    await bot.afterTick();
     return new Promise<void>((resolve, reject) => {
       const timers: ReturnType<typeof setTimeout>[] = [];
       const undo: (() => void)[] = [];

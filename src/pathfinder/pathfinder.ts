@@ -808,7 +808,16 @@ export class Pathfinder {
     const along = (e.position.x - (task.ref.x + 0.5)) * dir.x + (e.position.z - (task.ref.z + 0.5)) * dir.z;
     const moving = Math.hypot(e.velocity.x, e.velocity.z) > 0.01;
     run.still = moving ? 0 : run.still + 1;
-    if (along > 0.35 || (along > 0.1 && run.still > 3)) {
+    // The side being clicked faces the gap, so the eyes must be past it (beyond 0.5 from the centre)
+    // like a player leaning over the edge: anticheats (Grim's PositionPlace) refuse a click on a face
+    // the eyes are behind. Sneaking keeps the bot on the block up to about 0.8.
+    // Past the edge: stop first. The look back down at the side is nearly vertical, so drifting even
+    // a few hundredths of a block between the look and the click moves the ray off the face.
+    if (along > 0.56 && moving) {
+      this.setControls({ sneak: true });
+      return false;
+    }
+    if (along > 0.52 && !moving) {
       // At the edge: look back at the side of the block underfoot and place against it.
       const key = nodeKey(task.pos.x, task.pos.y, task.pos.z);
       const n = (run.attempts.get(key) ?? 0) + 1;

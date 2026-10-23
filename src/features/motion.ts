@@ -12,6 +12,16 @@ import type { ControlState, ControlStates } from '../types.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- protocol packets and prismarine-physics are untyped */
 
+/**
+ * prismarine-physics for a version, with the game's own values where it differs: before 1.9 the
+ * game zeroes velocities under 0.005 (not 0.003), which an anticheat's simulation (Grim) notices.
+ */
+export function createPhysics(Physics: (registry: unknown, world: unknown) => any, registry: any): any {
+  const physics = Physics(registry, { getBlock: () => null });
+  if (registry.version?.['<']?.('1.9')) physics.negligeableVelocity = 0.005;
+  return physics;
+}
+
 const PI = Math.PI;
 const PI_2 = Math.PI * 2;
 /** Ticks the bot must be on the ground and still before physics stops. */
@@ -79,9 +89,29 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
   const client = bot._client as any;
   const sf = bot.supportFeature;
   const { Physics, PlayerState } = bot.kit;
-  const physics = (bot.kit as any).sharedPhysics ?? ((bot.kit as any).sharedPhysics = Physics(bot.kit.registry, { getBlock: () => null }));
+  const physics = (bot.kit as any).sharedPhysics ?? ((bot.kit as any).sharedPhysics = createPhysics(Physics, bot.kit.registry));
   const world = { getBlock: (pos: Vec3) => bot.blockAt(pos) };
   const everyTick = sf('positionUpdateSentEveryTick');
+  // 1.21.2+: the game ends every client tick with this packet; anticheats (Grim's TickTimer) flag
+  // movement packets that aren't followed by one.
+  const tickEnd = Boolean((minecraftData(bot.version) as any)?.protocol?.play?.toServer?.types?.packet_tick_end);
+
+  // The game sends these from inside its tick, before that tick's movement packet; anticheats (Grim's
+  // Post) flag one that comes after the movement packet and before the next tick. Written between
+  // ticks, they wait for the start of the next one (at most 50 ms).
+  const tickBound = new Set(['entity_action', 'player_input', 'use_item', 'block_dig', 'block_place', 'arm_animation', 'held_item_slot', 'use_entity', 'abilities', 'spectate']);
+  if (bot.registry.version['<']('1.13')) tickBound.add('window_click');
+  const tickQueue: Array<[string, unknown]> = [];
+  let inTick = false;
+  const writeNow = client.write.bind(client);
+  client.write = (name: string, params: unknown): void => {
+    if (!inTick && active && unsubscribe && tickBound.has(name)) tickQueue.push([name, params]);
+    else writeNow(name, params);
+  };
+  const flushTickQueue = (): void => {
+    // Through client.write: the state guard (bot.ts) still applies when they go out.
+    for (const [name, params] of tickQueue.splice(0)) client.write(name, params);
+  };
 
   const controls: ControlStates = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
   const lastSent = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0, onGround: false, time: 0, flags: { onGround: false, hasHorizontalCollision: undefined as boolean | undefined } };
@@ -103,6 +133,34 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
   const entityActions = actionNames(bot.version);
   const sendsInput = serverboundPacket(bot.version, 'player_input') && bot.registry.version['>=']('1.21.2');
 
+  // The sprint key (controls.sprint) only asks to sprint; like the game, the bot sprints while it also
+  // moves forward and isn't hungry, sneaking, using an item, against a wall or wading, and says so
+  // with start/stop_sprinting. A bot that kept sprinting through a tick without forward input moved
+  // faster than an anticheat's simulation of the game (Grim's Simulation check).
+  let sprinting = false;
+  // From 1.14 crouching is a pose the game updates at the end of a tick: the sneak key slows the
+  // bot from the tick after it's pressed (and until the tick after it's released). Before, at once.
+  const crouchPose = bot.registry.version['>=']('1.14');
+  let crouching = false;
+  // Before 1.19.4 the game works out the sprint bonus to air movement after moving, so in the air a
+  // sprint started or stopped this tick only counts from the next one (on the ground, at once).
+  const airSprintLags = bot.registry.version['<']('1.19.4');
+  let airSprint = false;
+  const setSprinting = (on: boolean): void => {
+    sprinting = on;
+    const action = on ? 'start_sprinting' : 'stop_sprinting';
+    if (bot.entity && entityActions.has(action)) client.write('entity_action', { entityId: bot.entity.id, actionId: action, jumpBoost: 0 });
+  };
+  const updateSprint = (): void => {
+    const e = bot.entity as any;
+    const hungry = bot.game.gameMode !== 'creative' && bot.game.gameMode !== 'spectator' && typeof bot.food === 'number' && bot.food <= 6;
+    const slowed = controls.sneak || bot.usingHeldItem;
+    const wading = Boolean(e.isInWater) && bot.blockAt(e.position.offset(0, 1.62, 0))?.name !== 'water';
+    const blocked = Boolean(e.isCollidedHorizontally) || wading;
+    if (sprinting && (!controls.forward || hungry || slowed || blocked)) setSprinting(false);
+    else if (!sprinting && controls.sprint && controls.forward && !hungry && !slowed && !blocked) setSprinting(true);
+  };
+
   const api: MotionApi = {
     enabled: physicsAllowed,
     controls,
@@ -112,9 +170,12 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
       controls[control] = state;
       if (!bot.entity || client.state !== 'play') return;
       // Action names, not numbers: 1.21.6 renumbered them and dropped sneaking (now player_input).
-      const action =
-        control === 'sprint' ? (state ? 'start_sprinting' : 'stop_sprinting') : control === 'sneak' ? (state ? 'start_sneaking' : 'stop_sneaking') : null;
+      // Sprinting itself is decided each tick (updateSprint); letting go of the key stops it.
+      const action = control === 'sneak' ? (state ? 'start_sneaking' : 'stop_sneaking') : null;
       if (action && entityActions.has(action)) client.write('entity_action', { entityId: bot.entity.id, actionId: action, jumpBoost: 0 });
+      if (control === 'sprint' && !state && sprinting) setSprinting(false);
+      // Crouching lowers the eyes (1.27 from 1.14, 1.54 before): looking and ray casts aim from them.
+      if (control === 'sneak') (bot.entity as any).eyeHeight = state ? (bot.registry.version['>=']('1.14') ? 1.27 : 1.54) : 1.62;
       if (sendsInput) {
         client.write('player_input', {
           inputs: {
@@ -138,8 +199,9 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
       bot.entity.pitch = pitch;
       if (force) {
         // Like mineflayer: the next tick sends it, so it's never sent before the server placed us,
-        // while dead or outside the play state.
-        lastSentYaw = yaw;
+        // while dead or outside the play state. The sent yaw stays continuous (the game never wraps
+        // it; a 360° jump is flagged by anticheats, e.g. Grim's AimModulo360).
+        lastSentYaw += deltaYaw(yaw, lastSentYaw);
         lastSentPitch = pitch;
         return Promise.resolve();
       }
@@ -203,7 +265,8 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
     if (!api.enabled || !physicsAllowed) return false;
     if (anyControl() || settling > 0) return true;
     const v = bot.entity.velocity;
-    return Math.abs(v.x) > 1e-4 || Math.abs(v.y) > 1e-4 || Math.abs(v.z) > 1e-4;
+    // Standing, the game keeps a small downward velocity (gravity, cancelled by the ground).
+    return Math.abs(v.x) > 1e-4 || Math.abs(v.z) > 1e-4 || (!bot.entity.onGround && Math.abs(v.y) > 1e-4);
   };
 
   const simulate = (): void => {
@@ -215,7 +278,8 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
     const entity = bot.entity as any;
     entity.effects ??= {};
     entity.attributes ??= {};
-    const state = new PlayerState(bot, controls);
+    const sprint = airSprintLags && !bot.entity.onGround ? airSprint : sprinting;
+    const state = new PlayerState(bot, { ...controls, sprint, sneak: crouchPose ? crouching : controls.sneak });
     physics.simulatePlayer(state, world).apply(bot);
     api.physicsTicks++;
     if (bot.listenerCount('physicsTick') > 0) bot.emit('physicsTick');
@@ -226,7 +290,12 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
       stillTicks = still ? stillTicks + 1 : 0;
       if (stillTicks >= SETTLE_TICKS) {
         settling = 0;
-        v.set(0, 0, 0);
+        // Only the horizontal part: the vertical one is the resting value the game keeps (about
+        // -0.078/tick). Zeroing it made the next simulated tick miss the ground (the move has no
+        // downward part to collide), so the bot claimed to be in the air after every stop, which
+        // anticheats see as a ground spoof and a movement that doesn't match theirs.
+        v.x = 0;
+        v.z = 0;
       }
     }
   };
@@ -244,7 +313,7 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
     const maxPitch = (TICK_MS / 1000) * physics.pitchSpeed;
     lastSentYaw += Math.max(-maxYaw, Math.min(dYaw, maxYaw));
     lastSentPitch += Math.max(-maxPitch, Math.min(dPitch, maxPitch));
-    if (pendingLook && Math.abs(deltaYaw(entity.yaw, lastSentYaw)) < 0.001) {
+    if (pendingLook && Math.abs(deltaYaw(entity.yaw, lastSentYaw)) < 0.001 && Math.abs(entity.pitch - lastSentPitch) < 0.001) {
       pendingLook.resolve();
       pendingLook = null;
     }
@@ -274,13 +343,28 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
   };
 
   const tick = (): void => {
+    inTick = true;
+    try {
+      tickBody();
+    } finally {
+      inTick = false;
+    }
+  };
+
+  const tickBody = (): void => {
     if (!active || client.state !== 'play' || !bot.entity?.position) {
+      tickQueue.length = 0;
       flushTickWaiters();
       return;
     }
     try {
+      flushTickQueue();
+      updateSprint();
       if (needsPhysics()) simulate();
+      crouching = controls.sneak;
+      airSprint = sprinting;
       updatePosition(performance.now());
+      if (tickEnd) client.write('tick_end', {});
       flushTickWaiters();
     } catch (err) {
       flushTickWaiters();
@@ -324,7 +408,9 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
       active = true;
       settling = MAX_SETTLE_TICKS;
       stillTicks = 0;
-      lastSentYaw = entity.yaw;
+      // The yaw just echoed, unwrapped (entity.yaw is wrapped to 0–2π): the next rotation continues
+      // from it instead of jumping by 360°.
+      lastSentYaw = PI - (yaw * PI) / 180;
       lastSentPitch = entity.pitch;
       subscribe();
       bot.emit('forcedMove');

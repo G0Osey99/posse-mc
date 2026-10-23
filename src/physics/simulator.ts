@@ -2,6 +2,7 @@
 // without moving the bot. The pathfinder uses it to time jumps; bots can use it to predict where
 // they'll land. Runs prismarine-physics (MIT) on a copied player state, with the effect levels and
 // armour read once instead of every tick.
+import { createPhysics } from '../features/motion.js';
 import { Vec3 } from 'vec3';
 import type { PosseBot } from '../bot.js';
 import { enchantsOf } from '../items.js';
@@ -67,7 +68,7 @@ export class Simulator {
 
   constructor(private readonly bot: PosseBot) {
     const kit = bot.kit as any;
-    this.physics = kit.sharedPhysics ?? (kit.sharedPhysics = kit.Physics(kit.registry, { getBlock: () => null }));
+    this.physics = kit.sharedPhysics ?? (kit.sharedPhysics = createPhysics(kit.Physics, kit.registry));
     this.world = { getBlock: (pos: Vec3) => bot.blockAt(pos) };
   }
 

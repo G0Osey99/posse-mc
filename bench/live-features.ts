@@ -211,7 +211,9 @@ const scenarios: Record<string, Scenario> = {
 
   async fish(ctx) {
     const { bot } = ctx;
-    // A 9×13, 2-deep pool ahead: the cast lands 6–10 blocks out depending on the version.
+    // Open air above (earlier scenarios leave blocks around), then a 9×13, 2-deep pool ahead: the
+    // cast lands 6–10 blocks out depending on the version.
+    ctx.cmd.fill(ctx.base.offset(-12, 1, -8), ctx.base.offset(8, 6, 14), 'air');
     ctx.cmd.fill(ctx.base.offset(-4, -1, 2), ctx.base.offset(4, 0, 14), 'water');
     await ctx.waitFor(() => bot.blockAt(ctx.base.offset(0, 0, 8))?.name === 'water', 5000, 'water');
     await bot.equip(await giveAndWait(ctx, 'fishing_rod'), 'hand');
@@ -239,6 +241,7 @@ const scenarios: Record<string, Scenario> = {
     await bot.equip(await giveAndWait(ctx, 'fishing_rod'), 'hand');
     // Solid ground first (the fish scenario leaves a pool here; in open water a bobber slides on
     // about two blocks after landing, which a hole's walls stop).
+    ctx.cmd.fill(ctx.base.offset(-12, 1, -8), ctx.base.offset(8, 6, 14), 'air');
     ctx.cmd.fill(ctx.base.offset(-12, -1, -8), ctx.base.offset(8, 0, 14), 'dirt');
     await ctx.waitFor(() => bot.blockAt(ctx.base.offset(0, 0, 8))?.name === 'dirt', 5000, 'the pool filled in');
     // 1×1 holes (one block of water in the ground) at different distances and sides.
@@ -251,7 +254,7 @@ const scenarios: Record<string, Scenario> = {
     // bobber is up to a block off before 1.13, so its position isn't the test).
     for (const hole of [holes[0]!, holes[2]!]) {
       const t0 = Date.now();
-      await bot.fish({ at: hole.offset(0.5, 0.9, 0.5), timeout: 55_000 });
+      await bot.fish({ at: hole.offset(0.5, 0.9, 0.5), timeout: 100_000 });
       ctx.log(`hole ${hole.minus(ctx.base)}: bite after ${Date.now() - t0} ms`);
       await ctx.sleep(800);
     }

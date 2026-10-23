@@ -1,7 +1,9 @@
 // Live checks of the pathfinder against a vanilla server (see liveHarness.ts): courses are built
 // with console commands on a flat world, then the bot walks them.
 //
-//   tsx bench/live-pathfinder.ts --accept-eula [--versions 1.21.4] [--only walk,parkour] [--verbose]
+//   tsx bench/live-pathfinder.ts --accept-eula [--versions 1.21.4] [--only walk,parkour] [--verbose] [--grim]
+// --grim runs Paper with GrimAC instead of vanilla and fails a course on any Grim flag.
+// POSSE_TRACE_MOVES=1 logs every movement packet with the held keys (and POSSE_TRACE_PLACE=1 each click).
 import { Vec3 } from 'vec3';
 import { goals, NoPathError, type PathResult } from '../src/index.js';
 import { connect, main, type LiveContext, type Scenario } from './liveHarness.js';

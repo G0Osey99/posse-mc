@@ -257,6 +257,38 @@ non-throwing framer that feeds decompression, the gate and the reader directly, 
 decoded packet once by name (`packet` / `raw` only when listened to). Kept chunks are stored
 deflated (81 columns ≈ 45 KB on the fake terrain). Screenshots render in ~100–230 ms on a worker.
 
+## Anticheat fidelity (0.4)
+
+Run against Paper with GrimAC (`bench/live-pathfinder.ts --grim`: Paper from fill.papermc.io and
+GrimAC from Modrinth, both checksum-verified; Grim's verbose output is turned on so every violation
+fails a course, not only those past its alert threshold), the pathfinder's courses showed where the
+bot's packets differed from the game's. Each is now done the game's way:
+
+- **Tick end (1.21.2+).** The game ends every client tick with `tick_end`; Grim's TickTimer flags
+  movement without it. Sent every tick.
+- **Actions inside the tick.** Sprint/sneak (`entity_action`), `player_input`, use, dig, place,
+  swing, hotbar and interact packets written between ticks wait for the start of the next tick and
+  go out before its movement packet (Grim's Post). A click's rotation is held until the movement
+  after it has gone out (Grim's RotationPlace checks the rotation after the click before 1.9).
+- **Continuous yaw.** The sent yaw never jumps by 360° (forced looks and teleports continue from
+  the last sent value; Grim's AimModulo360).
+- **Standing still.** A resting bot keeps the game's downward velocity (about −0.078/tick) instead
+  of zero; zeroing it made the first tick after every stop miss the ground (GroundSpoof, then a
+  Simulation offset fading by the ground friction 0.546 a tick).
+- **Sprinting like the game.** The sprint key only asks: the bot sprints while it also moves
+  forward and isn't hungry, sneaking, using an item, against a wall or wading, with start/stop
+  packets. Before 1.19.4 the air-movement sprint bonus counts from the tick after it changes.
+- **Crouching pose (1.14+).** The sneak slowdown starts the tick after the key (it's a pose).
+- **Eye height.** Lower while sneaking (1.27 from 1.14, 1.54 before): looks and ray casts aim from
+  the real eyes.
+- **1.8 physics.** Velocities under 0.005 are zeroed before 1.9 (prismarine-physics uses 0.003).
+- **Bridging.** The bot stops past the edge of its block before clicking the side under it, so the
+  eyes are beyond the clicked face (Grim's PositionPlace) and the near-vertical look still hits it.
+
+After this every course (walk, around, tunnel, stairs, drop, parkour, bridge, pillar, digdown,
+door, swim, ladder, nopath, follow, far) runs without a single Grim violation on Paper 1.8.8 and
+1.21.4.
+
 ## Verification
 
 - Unit tests for decoding, every version branch (packet fixtures generated from minecraft-data),
