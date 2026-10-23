@@ -1,5 +1,5 @@
 // Live checks of digging, placing, crafting, containers, furnaces, books, enchanting, trading,
-// eating and ray casts against a vanilla server (see liveHarness.ts).
+// eating, fishing, block search and ray casts against a vanilla server (see liveHarness.ts).
 //
 //   tsx bench/live-features.ts --accept-eula [--versions 1.21.4] [--only dig,craft] [--verbose]
 import { Vec3 } from 'vec3';
@@ -207,6 +207,66 @@ const scenarios: Record<string, Scenario> = {
     const before = bot.food;
     await bot.consume();
     await ctx.waitFor(() => bot.food > before, 3000, 'food to rise');
+  },
+
+  async fish(ctx) {
+    const { bot } = ctx;
+    // A 9×13, 2-deep pool ahead: the cast lands 6–10 blocks out depending on the version.
+    ctx.cmd.fill(ctx.base.offset(-4, -1, 2), ctx.base.offset(4, 0, 14), 'water');
+    await ctx.waitFor(() => bot.blockAt(ctx.base.offset(0, 0, 8))?.name === 'water', 5000, 'water');
+    await bot.equip(await giveAndWait(ctx, 'fishing_rod'), 'hand');
+    await bot.lookAt(ctx.base.offset(0.5, 1, 5.5), true);
+    // A catch is the item the server throws at the bot (it may land short, in the water, before 1.13).
+    let catches = 0;
+    const unwatch = bot.watchSpawns(['item'], () => catches++, { within: 20 });
+    try {
+      for (let cast = 1; cast <= 2; cast++) {
+        const before = catches;
+        const t0 = Date.now();
+        await bot.fish({ timeout: 90_000 });
+        ctx.log(`cast ${cast}: bite after ${Date.now() - t0} ms`);
+        await ctx.waitFor(() => catches > before, 5000, 'the catch');
+        if (bot.fishingBobber) throw new Error('bobber still set after reeling in');
+        await ctx.sleep(500);
+      }
+    } finally {
+      unwatch();
+    }
+  },
+
+  async aim(ctx) {
+    const { bot } = ctx;
+    await bot.equip(await giveAndWait(ctx, 'fishing_rod'), 'hand');
+    // Solid ground first (the fish scenario leaves a pool here; in open water a bobber slides on
+    // about two blocks after landing, which a hole's walls stop).
+    ctx.cmd.fill(ctx.base.offset(-12, -1, -8), ctx.base.offset(8, 0, 14), 'dirt');
+    await ctx.waitFor(() => bot.blockAt(ctx.base.offset(0, 0, 8))?.name === 'dirt', 5000, 'the pool filled in');
+    // 1×1 holes (one block of water in the ground) at different distances and sides.
+    const holes = [ctx.base.offset(0, 0, 4), ctx.base.offset(5, 0, -5), ctx.base.offset(-10, 0, 1)];
+    for (const hole of holes) {
+      ctx.cmd.fill(hole.offset(0, -1, 0), hole, 'water');
+      await ctx.waitFor(() => bot.blockAt(hole)?.name === 'water', 5000, `water at ${hole}`);
+    }
+    // A bite only comes in water: one in each hole means each cast landed in it (the tracked
+    // bobber is up to a block off before 1.13, so its position isn't the test).
+    for (const hole of [holes[0]!, holes[2]!]) {
+      const t0 = Date.now();
+      await bot.fish({ at: hole.offset(0.5, 0.9, 0.5), timeout: 55_000 });
+      ctx.log(`hole ${hole.minus(ctx.base)}: bite after ${Date.now() - t0} ms`);
+      await ctx.sleep(800);
+    }
+  },
+
+  async find(ctx) {
+    const { bot } = ctx;
+    const near = ctx.base.offset(3, 0, -2);
+    const far = ctx.base.offset(-6, -1, 5);
+    await setAndWait(ctx, near, 'diamond_ore');
+    await setAndWait(ctx, far, 'diamond_ore');
+    const found = bot.findBlocks({ matching: 'diamond_ore', count: 5, maxDistance: 12 });
+    if (found.length !== 2 || !found[0]!.equals(near) || !found[1]!.equals(far)) throw new Error(`found ${found.map(String).join(', ')}`);
+    if (bot.findBlock({ matching: 'diamond_ore', maxDistance: 2 })) throw new Error('found an ore outside the radius');
+    if (bot.findBlock({ matching: (b) => b.name === 'diamond_ore', maxDistance: 6 })?.position.equals(near) !== true) throw new Error('matcher function');
   },
 
   async raycast(ctx) {

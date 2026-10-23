@@ -7,6 +7,10 @@ import { clickUsesHashedSlots, normalizeWindowTitle, playerInventorySlotToWindow
 import { actionNames, deltaYaw, touchesBot, velocityIsLpVec3 } from '../src/features/motion.js';
 import { extractSkin } from '../src/features/players.js';
 import { spawnTypeFilter } from '../src/features/spawns.js';
+import { castAngles, castLanding, isBiteParticle } from '../src/features/fishing.js';
+import { findBlocks, stateIdsOf } from '../src/features/findBlocks.js';
+import { Vec3 } from 'vec3';
+import minecraftData from 'minecraft-data';
 import { colorName, sortScores } from '../src/features/scoreboard.js';
 import * as conv from '../src/conv.js';
 import { parseGameMode, serverboundNames } from '../src/bot.js';
@@ -186,5 +190,70 @@ describe('chat while out of the game', () => {
     ended.client.emit('login', {});
     await new Promise((r) => setImmediate(r));
     expect(ended.client.sent).toEqual([]);
+  });
+});
+
+describe('fishing', () => {
+  const names = new Map([[4, 'bubble'], [29, 'fishing'], [5, 'splash']]);
+  const nameOf = (p: { particleId?: number; particle?: { type: string } }) => (p.particle ? p.particle.type : names.get(p.particleId!));
+  const bobber = { x: 10.5, z: -3.2 };
+
+  it('sees the six-particle burst at the bobber, in both packet shapes', () => {
+    expect(isBiteParticle({ particleId: 4, particles: 6, x: 10.9, z: -3.0 }, nameOf, bobber)).toBe(true);
+    expect(isBiteParticle({ particle: { type: 'fishing' }, amount: 6, x: 10.2, z: -3.9 }, nameOf, bobber)).toBe(true);
+  });
+
+  it('ignores trails, splashes and other bobbers', () => {
+    expect(isBiteParticle({ particleId: 29, particles: 2, x: 10.5, z: -3.2 }, nameOf, bobber)).toBe(false);
+    expect(isBiteParticle({ particleId: 5, particles: 6, x: 10.5, z: -3.2 }, nameOf, bobber)).toBe(false);
+    expect(isBiteParticle({ particleId: 4, particles: 6, x: 13.5, z: -3.2 }, nameOf, bobber)).toBe(false);
+  });
+});
+
+describe('findBlocks', () => {
+  const registry = minecraftData('1.18.2');
+  const diamond = registry.blocksByName.diamond_ore!.minStateId!;
+  const stone = registry.blocksByName.stone!.minStateId!;
+  const placed = new Map([['3,10,0', diamond], ['-1,11,1', diamond], ['0,10,9', diamond]]);
+  const world = {
+    stateIdAt: (x: number, y: number, z: number) => (Math.abs(x) > 20 ? null : (placed.get(`${x},${y},${z}`) ?? (y < 10 ? stone : 0))),
+    blockAt: (x: number, y: number, z: number) => ({ name: placed.has(`${x},${y},${z}`) ? 'diamond_ore' : 'stone', position: new Vec3(x, y, z) }) as never,
+  };
+  const bounds = { minY: -64, maxY: 319 };
+
+  it('returns the nearest matches first within the radius', () => {
+    const found = findBlocks(world, registry, new Vec3(0.5, 10, 0.5), { matching: 'diamond_ore', count: 5, maxDistance: 8 }, bounds);
+    expect(found.map(String)).toEqual(['(-1, 11, 1)', '(3, 10, 0)']);
+  });
+
+  it('takes a test function and covers every state of a block', () => {
+    const found = findBlocks(world, registry, new Vec3(0, 10, 0), { matching: (b) => b.name === 'diamond_ore', count: 3, maxDistance: 10 }, bounds);
+    expect(found).toHaveLength(3);
+    expect(stateIdsOf(minecraftData('1.8.9'), ['diamond_ore']).size).toBe(16);
+    expect(findBlocks(world, registry, new Vec3(0, 10, 0), { matching: 'nope' }, bounds)).toEqual([]);
+  });
+});
+
+describe('cast aiming', () => {
+  it('lands where it aims', () => {
+    const eye = new Vec3(0.5, 65.62, 0.5);
+    for (const legacy of [false, true]) {
+      for (const target of [new Vec3(0.5, 64.9, 4.5), new Vec3(7.5, 63.9, -3.5), new Vec3(-9.5, 64.9, 2.5)]) {
+        const look = castAngles(eye, target, legacy)!;
+        expect(look).not.toBeNull();
+        const pitchDeg = (-look.pitch * 180) / Math.PI;
+        const landing = castLanding(pitchDeg, target.y - eye.y, legacy)!;
+        expect(Math.abs(landing - Math.hypot(target.x - eye.x, target.z - eye.z))).toBeLessThanOrEqual(0.3);
+      }
+    }
+  });
+
+  it('prefers the high arc when both reach', () => {
+    const look = castAngles(new Vec3(0.5, 65.62, 0.5), new Vec3(0.5, 64.9, 9.5), true)!;
+    expect(look.pitch).toBeGreaterThan(0);
+  });
+
+  it('refuses targets out of reach', () => {
+    expect(castAngles(new Vec3(0, 65.62, 0), new Vec3(0, 64, 40), false)).toBeNull();
   });
 });

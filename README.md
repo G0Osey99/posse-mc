@@ -6,8 +6,9 @@ built to run dozens of bots in one process. It can also render **first-person sc
 each bot sees, with the game's own textures.
 
 > Early release (0.x): verified against a local test server on 1.8.9, 1.12.2, 1.16.5, 1.18.2,
-> 1.19.4, 1.20.4, 1.21.4 and 26.1, and digging, building, crafting, trading, books, enchanting and
-> pathfinding against vanilla servers on 1.8.9, 1.12.2, 1.16.5, 1.20.4, 1.21.4 and 26.1. Reports
+> 1.19.4, 1.20.4, 1.21.4 and 26.1, and digging, building, crafting, trading, books, enchanting,
+> fishing, block search and pathfinding against vanilla servers on 1.8.9, 1.12.2, 1.16.5, 1.20.4,
+> 1.21.4 and 26.1. Reports
 > from live servers are welcome.
 
 ## Why
@@ -95,7 +96,8 @@ The mineflayer-compatible slice:
   `setQuickBarSlot`, `activateItem`, `deactivateItem`, `consume`, `blockAt`, `blockAtCursor`,
   `blockInSight`, `entityAtCursor`, `canSeeBlock`, `look`, `lookAt`, `setControlState`,
   `getControlState`, `clearControlStates`, `swingArm`, `attack`, `useOn`, `activateBlock`,
-  `activateEntity`, `activateEntityAt`, `dig`, `stopDigging`, `canDigBlock`, `digTime`,
+  `activateEntity`, `activateEntityAt`, `dig`, `stopDigging`, `canDigBlock`, `digTime`, `fish`,
+  `findBlock`, `findBlocks`,
   `placeBlock`, `openBlock`, `openEntity`, `openContainer`, `openChest`, `openFurnace`,
   `openEnchantmentTable`, `openVillager`, `trade`, `craft`, `recipesFor`, `recipesAll`,
   `writeBook`, `signBook`, `respawn`, `acceptResourcePack`, `denyResourcePack`, `quit`, `end`.
@@ -163,11 +165,20 @@ await villager.trade(0, 1);
 // Books.
 await bot.writeBook(36, ['page one', 'page two']);
 await bot.signBook(36, ['page one'], bot.username, 'Title');
+
+// Fishing: cast with the held rod, wait for a bite, reel in (rejects on timeout, abort, or when
+// the bobber goes, e.g. after a hotbar switch). `at` aims the cast to land on a point first.
+await bot.fish({ timeout: 90_000 });
+await bot.fish({ at: new Vec3(12.5, 63.9, -4.5) }); // the top of a water block, even a 1×1 hole
+
+// Block search in the kept chunks, nearest first (names, ids or a test on the Block).
+const ores = bot.findBlocks({ matching: ['diamond_ore', 'deepslate_diamond_ore'], maxDistance: 32, count: 10 });
+const chestBlock = bot.findBlock({ matching: 'chest', maxDistance: 16 });
 ```
 
 Interactions look at their target and wait for the rotation to reach the server before clicking,
 so the server (and its anticheat) sees what the game would. Verified against vanilla servers on
-1.8.9, 1.12.2, 1.16.5, 1.20.4, 1.21.4 and 26.1 (`bench/live-features.ts`).
+1.8.9, 1.12.2, 1.16.5, 1.18.2, 1.20.4, 1.21.4 and 26.1 (`bench/live-features.ts`).
 
 ## Pathfinding
 

@@ -211,12 +211,13 @@ export class GoalFollow extends Goal {
     const dz = this.z - node.z;
     return dx * dx + dy * dy + dz * dz <= this.rangeSq;
   }
+  /**
+   * Whether the target is on another block than the goal was aimed at. (mineflayer-pathfinder waits
+   * until it's `range` away, so a follower could end up almost twice `range` behind.)
+   */
   hasChanged(): boolean {
     const p = this.entity.position.floored();
-    const dx = this.x - p.x;
-    const dy = this.y - p.y;
-    const dz = this.z - p.z;
-    return dx * dx + dy * dy + dz * dz > this.rangeSq;
+    return p.x !== this.x || p.y !== this.y || p.z !== this.z;
   }
   refresh(): void {
     const p = this.entity.position.floored();

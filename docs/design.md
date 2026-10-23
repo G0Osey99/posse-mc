@@ -161,6 +161,29 @@ furnaces, enchanting tables), `raycast.ts`, `effects.ts`.
   interact-only `use_entity` and separate attack packet are handled; window `close` fires however
   the window closes, so per-window listeners never leak.
 
+## Fishing and block search (0.4)
+
+- **Bites as the game shows them.** `fish()` casts, then waits for the burst of six bubble /
+  fishing particles (wake before 1.13) at the bobber, like mineflayer. The bot's own bobber (the
+  `fishing_bobber` whose spawn data is the bot's entity id) is put in `bot.entities` while it
+  fishes, so its movement is decoded like a tracked entity's; particle packets are only listened to
+  (and so decoded) during a cast. The burst may be up to 2 blocks from the tracked bobber, which
+  lags a little on older versions. A cast rejects when no bobber appears within 3 s, the bobber is
+  destroyed (a hotbar switch, a grounded bobber's 60 s despawn), `timeout` passes (reeling in) or
+  the signal aborts.
+- **Aimed casts.** `fish({ at })` turns to the angle that lands the bobber on the point:
+  `castLanding` replays the bobber's flight (before 1.12: 1.5 blocks/tick along the look, gravity
+  0.04 after moving; from 1.12: 0.6·cos(pitch) + 0.5 horizontally from 0.3 blocks ahead, the
+  vertical part −tan(pitch) times that, gravity 0.03 before moving; 92 % kept per tick) and
+  `castAngles` takes the steepest pitch within ±60° that lands within 0.3 blocks, so it drops into
+  small holes. Measured against vanilla, landings agree within a few tenths of a block; casts landed
+  in 1×1 holes 4–12 blocks away on 1.8.9, 1.12.2 and 1.21.4. In open water a bobber slides on about
+  two blocks after landing (it keeps 30 % of its speed); a hole's walls stop it.
+- **Block search without Block objects.** `findBlocks()` turns names or ids into the set of their
+  state ids (every version has `minStateId`…`maxStateId`) and reads `world.stateIdAt` over the
+  sphere, nearest first; only a matcher function builds Blocks. It sees only kept chunks
+  (`worldRadius`).
+
 ## Physics simulation (0.3)
 
 `src/physics/simulator.ts` runs prismarine-physics on a copy of the player state: `predict(controls,

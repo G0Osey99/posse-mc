@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import { Vec3 } from 'vec3';
 import type { PosseBot } from '../src/bot.js';
+import type { Entity } from '../src/types.js';
 import { nodeKey, search } from '../src/pathfinder/astar.js';
 import { BlockFlag, blockInfo } from '../src/pathfinder/blocks.js';
 import { COST_HEURISTIC, distanceToTicks, FALL_N_BLOCKS_COST, JUMP_ONE_BLOCK_COST } from '../src/pathfinder/costs.js';
@@ -11,6 +12,7 @@ import {
   GoalBlock,
   GoalCompositeAll,
   GoalCompositeAny,
+  GoalFollow,
   GoalGetToBlock,
   GoalInvert,
   GoalNear,
@@ -340,5 +342,19 @@ describe('feet to node', () => {
     expect(nodeOf(new Vec3(0.5, 64.5, 0.5))).toEqual({ x: 0, y: 65, z: 0 });
     expect(nodeOf(new Vec3(0.5, 63.875, 0.5))).toEqual({ x: 0, y: 64, z: 0 });
     expect(nodeOf(new Vec3(-0.5, 64, -0.5))).toEqual({ x: -1, y: 64, z: -1 });
+  });
+});
+
+describe('GoalFollow', () => {
+  it('re-aims as soon as the target is on another block', () => {
+    const entity = { position: new Vec3(10.4, 64, 10.6), isValid: true } as unknown as Entity;
+    const goal = new GoalFollow(entity, 3);
+    expect(goal.hasChanged()).toBe(false);
+    entity.position.set(10.9, 64, 10.2); // same block
+    expect(goal.hasChanged()).toBe(false);
+    entity.position.set(11.1, 64, 10.2);
+    expect(goal.hasChanged()).toBe(true);
+    goal.refresh();
+    expect(goal.hasChanged()).toBe(false);
   });
 });

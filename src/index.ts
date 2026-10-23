@@ -17,4 +17,7 @@ export type { Villager, Trade } from './features/villager.js';
 export type { EnchantmentTable, EnchantmentOption, Furnace } from './features/workstations.js';
 export type { PlaceOptions } from './features/building.js';
 export type { DigFace } from './features/digging.js';
+export type { FishOptions } from './features/fishing.js';
+export { castAngles, isBiteParticle } from './features/fishing.js';
+export type { FindBlocksOptions } from './features/findBlocks.js';
 export type { RaycastBlock } from './features/raycast.js';

@@ -13,6 +13,8 @@ import { installChat } from './features/chat.js';
 import { installCrafting, type CraftingApi } from './features/crafting.js';
 import { installDigging, type DigFace, type DiggingApi } from './features/digging.js';
 import { installEffects } from './features/effects.js';
+import { installFishing, type FishOptions, type FishingApi } from './features/fishing.js';
+import { findBlocks, type FindBlocksOptions } from './features/findBlocks.js';
 import { installInteract, type InteractApi } from './features/interact.js';
 import { installInventory, type InventoryApi, type OpenWindow, type TransferOptions } from './features/inventory.js';
 import { installRaycast, type RaycastApi, type RaycastBlock } from './features/raycast.js';
@@ -126,6 +128,7 @@ export class PosseBot extends EventEmitter {
   private interactApi!: InteractApi;
   private raycastApi!: RaycastApi;
   private diggingApi!: DiggingApi;
+  private fishingApi!: FishingApi;
   private buildingApi!: BuildingApi;
   private craftingApi!: CraftingApi;
   private villagerApi!: VillagerApi;
@@ -263,6 +266,7 @@ export class PosseBot extends EventEmitter {
     installWorld(this);
     this.raycastApi = installRaycast(this);
     this.diggingApi = installDigging(this);
+    this.fishingApi = installFishing(this);
     this.buildingApi = installBuilding(this);
     this.craftingApi = installCrafting(this);
     this.villagerApi = installVillager(this);
@@ -716,6 +720,20 @@ export class PosseBot extends EventEmitter {
     return this.diggingApi.dig(block, forceLook, digFace);
   }
 
+  /**
+   * Fishes once with the held rod: casts, waits for a bite (the burst of bubbles at the bobber) and
+   * reels in. Rejects when no bobber appears, the bobber is gone, `timeout` passes (reeling in) or
+   * `signal` aborts.
+   */
+  fish(options?: FishOptions): Promise<void> {
+    return this.fishingApi.fish(options);
+  }
+
+  /** The bot's fishing bobber while it fishes, else null. */
+  get fishingBobber(): Entity | null {
+    return this.fishingApi.bobber;
+  }
+
   stopDigging(): void {
     this.diggingApi.stopDigging();
   }
@@ -828,6 +846,24 @@ export class PosseBot extends EventEmitter {
   /** The block at a position, or null when its chunk isn't kept (outside `worldRadius`). */
   blockAt(point: { x: number; y: number; z: number }): Block | null {
     return this.world.blockAt(point.x, point.y, point.z);
+  }
+
+  /**
+   * Positions of blocks matching `options.matching` (names, ids or a test) within `maxDistance`
+   * (default 16) of the bot or `point`, nearest first, at most `count` (default 1). Only kept chunks
+   * (`worldRadius`) are searched.
+   */
+  findBlocks(options: FindBlocksOptions): Vec3[] {
+    if (!this.entity) return [];
+    const minY = this.game.minY ?? 0;
+    const bounds = { minY, maxY: minY + (this.game.height ?? 256) - 1 };
+    return findBlocks({ stateIdAt: (x, y, z) => this.world.stateIdAt(x, y, z), blockAt: (x, y, z) => this.world.blockAt(x, y, z) }, this.registry, this.entity.position, options, bounds);
+  }
+
+  /** The nearest block matching `options.matching`, or null (see `findBlocks`). */
+  findBlock(options: Omit<FindBlocksOptions, 'count'>): Block | null {
+    const [pos] = this.findBlocks({ ...options, count: 1 });
+    return pos ? this.blockAt(pos) : null;
   }
 
   /** The first block a ray hits (with `face` and `intersect`), or null within `maxDistance`. */
