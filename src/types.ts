@@ -215,6 +215,8 @@ export interface PosseBotEvents {
   explosion: (explosion: ExplosionInfo) => void;
   /** Server-initiated transfer to another server (1.20.5+). */
   transfer: (host: string, port: number) => void;
+  /** The bot's abilities changed (`bot.abilities`: flight allowed, flying, speeds). */
+  abilities: () => void;
   [event: `setWindowItems:${number}`]: () => void;
   [event: `confirmTransaction${number}`]: (accepted: boolean) => void;
 }

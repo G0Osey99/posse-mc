@@ -9,8 +9,9 @@ each bot sees, with the game's own textures.
 > 1.19.4, 1.20.4, 1.21.4 and 26.1, and digging, building, crafting, trading, books, enchanting,
 > fishing, block search and pathfinding against vanilla servers on 1.8.9, 1.12.2, 1.16.5, 1.20.4,
 > 1.21.4 and 26.1. The pathfinder's courses also run without a single GrimAC violation on Paper
-> 1.8.8, 1.12.2, 1.18.2, 1.20.4 and 1.21.4 (`bench/live-pathfinder.ts --grim`). Reports
-> from live servers are welcome.
+> 1.8.8, 1.12.2, 1.18.2, 1.20.4 and 1.21.4 (`bench/live-pathfinder.ts --grim`), and so does
+> flight on 1.8.8 and 1.21.4 (`bench/live-features.ts --grim --only fly`). Reports from live
+> servers are welcome.
 
 ## Why
 
@@ -91,7 +92,7 @@ The mineflayer-compatible slice:
   `entity` (with `effects`), `entities`, `players`, `health`, `food`, `isAlive`, `experience`,
   `time`, `isRaining`, `scoreboard` (`sidebar`, `list`, `belowName`), `scoreboards`, `teams`,
   `inventory`, `currentWindow`, `heldItem`, `quickBarSlot`, `usingHeldItem`, `targetDigBlock`,
-  `physicsEnabled`, `pathfinder`.
+  `physicsEnabled`, `pathfinder`, `abilities`.
 - **Methods**: `chat`, `whisper`, `tabComplete`, `clickWindow`, `closeWindow`, `moveSlotItem`,
   `putAway`, `putSelectedItemRange`, `transfer`, `toss`, `tossStack`, `equip`, `unequip`,
   `setQuickBarSlot`, `activateItem`, `deactivateItem`, `consume`, `blockAt`, `blockAtCursor`,
@@ -101,7 +102,8 @@ The mineflayer-compatible slice:
   `findBlock`, `findBlocks`,
   `placeBlock`, `openBlock`, `openEntity`, `openContainer`, `openChest`, `openFurnace`,
   `openEnchantmentTable`, `openVillager`, `trade`, `craft`, `recipesFor`, `recipesAll`,
-  `writeBook`, `signBook`, `respawn`, `acceptResourcePack`, `denyResourcePack`, `quit`, `end`.
+  `writeBook`, `signBook`, `respawn`, `acceptResourcePack`, `denyResourcePack`, `quit`, `end`,
+  `setFlying`.
 - **Events**: `login`, `spawn`, `respawn`, `game`, `death`, `health`, `experience`, `kicked`,
   `end`, `error`, `message`, `messagestr`, `actionBar`, `title`, `title_times`, `title_clear`,
   `windowOpen`, `windowClose`, `heldItemChanged`, `playerJoined`, `playerUpdated`, `playerLeft`,
@@ -109,7 +111,7 @@ The mineflayer-compatible slice:
   `playerCollect`, `blockUpdate`, `blockPlaced`, `diggingCompleted`, `diggingAborted`,
   `chunkColumnLoad`, `chunkColumnUnload`, `scoreboardCreated`, `scoreUpdated`, `scoreRemoved`,
   `scoreboardPosition`, `teamCreated`, `teamUpdated`, `teamRemoved`, `time`, `rain`,
-  `resourcePack`, `forcedMove`, `move`, `physicsTick`, `transfer`, and the pathfinder's
+  `resourcePack`, `forcedMove`, `move`, `physicsTick`, `transfer`, `abilities`, and the pathfinder's
   `goal_reached`, `goal_updated`, `path_update`, `path_reset`, `path_stop`.
 
 Windows opened with `openBlock` / `openEntity` (and the helpers built on them) have `close()`,
@@ -215,6 +217,25 @@ fails, or a followed entity moves.
 - A bot only knows the chunks within `worldRadius` (default 4); long trips are planned in stretches.
   Raise it for longer single plans.
 - Elytra flight is not included.
+
+## Flight
+
+When the server allows flight (`/fly`, creative), the bot flies the game's way:
+
+```ts
+bot.on('abilities', () => console.log(bot.abilities)); // { allowFlying, flying, flySpeed, … }
+if (bot.abilities.allowFlying) {
+  await bot.setFlying(true);      // takes off (jumps if on the ground)
+  bot.setControlState('jump', true);  // rise; 'sneak' sinks; forward/sprint fly
+  // …
+  await bot.setFlying(false);     // or land: touching the ground ends the flight
+}
+```
+
+`setFlying(true)` rejects when the server hasn't allowed flight. Flying uses the game's values
+(10.89 blocks/s, 21.78 sprinting, 7.5 up or down) and runs without GrimAC violations; the
+simulator flies too (`SimState.flying`, `flySpeed`). Other players' `entity.onGround` comes from
+their movement packets.
 
 ## Physics simulation
 

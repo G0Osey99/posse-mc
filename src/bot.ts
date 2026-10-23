@@ -24,6 +24,7 @@ import type { Recipe } from './recipes.js';
 import { Pathfinder } from './pathfinder/pathfinder.js';
 import { Simulator } from './physics/simulator.js';
 import { installMotion, type MotionApi } from './features/motion.js';
+import { defaultAbilities, type Abilities } from './features/flight.js';
 import { installPlayers } from './features/players.js';
 import { installScoreboard } from './features/scoreboard.js';
 import { createSpawnWatch, type SpawnWatch } from './features/spawns.js';
@@ -792,6 +793,25 @@ export class PosseBot extends EventEmitter {
 
   look(yaw: number, pitch: number, force = true): Promise<void> {
     return this.motion.look(yaw, pitch, force);
+  }
+
+  /**
+   * What the server lets the bot do (the `abilities` packet): whether it may fly (`/fly`,
+   * creative) and is flying, and the speeds. `flying` follows the bot's own flight too.
+   */
+  get abilities(): Abilities {
+    return this.motion?.abilities ?? defaultAbilities();
+  }
+
+  /**
+   * Starts or stops flying, the way the game does on a double jump: from the next tick, with the
+   * abilities packet before that tick's movement (taking off from the ground jumps). While flying,
+   * `jump` rises, `sneak` sinks and the other controls move; landing ends the flight. Rejects
+   * when the server hasn't allowed flight (`abilities.allowFlying`) or the bot isn't in the world.
+   */
+  setFlying(flying: boolean): Promise<void> {
+    if (!this.motion) return Promise.reject(new Error('The bot is not in the world yet'));
+    return this.motion.setFlying(flying);
   }
 
   /**

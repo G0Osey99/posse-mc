@@ -10,6 +10,7 @@ import { Vec3 } from 'vec3';
 import { createBot, type PosseBot } from '../src/index.js';
 import { startVanilla, type VanillaOptions, type VanillaServer } from './vanilla.js';
 import { grimJar, paperJar, parseGrimFlag, type GrimFlag } from './paperGrim.js';
+import { flightPluginJar } from './flightPlugin.js';
 
 const DEFAULT_VERSIONS = ['1.8.9', '1.12.2', '1.16.5', '1.20.4', '1.21.4', '26.1'];
 
@@ -17,6 +18,8 @@ export interface LiveContext {
   bot: PosseBot;
   server: VanillaServer;
   version: string;
+  /** Paper (with --grim): the `posseflight <player> on|off` console command grants survival flight. */
+  paper: boolean;
   cmd: Commands;
   /** The block the bot stands on at the start (scenarios build around it). */
   base: Vec3;
@@ -109,9 +112,9 @@ export async function connect(server: VanillaServer, username: string, extra: Re
     const c = bot._client as any;
     const write = c.write.bind(c);
     c.write = (name: string, p: any) => {
-      if (/^(position|position_look|look|flying|entity_action)$/.test(name)) {
+      if (/^(position|position_look|look|flying|entity_action|abilities)$/.test(name)) {
         const k = Object.entries((bot as any).motion?.controls ?? {}).filter(([, v]) => v).map(([n]) => n[0]).join('');
-        console.log(`  [${Date.now() % 100000}] ${name} ${p.x?.toFixed(4) ?? ''} ${p.y?.toFixed(4) ?? ''} ${p.z?.toFixed(4) ?? ''} ${p.yaw !== undefined ? `yaw ${p.yaw.toFixed(2)}` : ''} ${p.onGround ?? ''} ${p.actionId ?? ''} keys ${k} v ${bot.entity.velocity.x.toFixed(3)},${bot.entity.velocity.y.toFixed(3)},${bot.entity.velocity.z.toFixed(3)}`);
+        console.log(`  [${Date.now() % 100000}] ${name} ${p.x?.toFixed(4) ?? ''} ${p.y?.toFixed(4) ?? ''} ${p.z?.toFixed(4) ?? ''} ${p.yaw !== undefined ? `yaw ${p.yaw.toFixed(2)}` : ''} ${p.onGround ?? ''} ${p.actionId ?? ''} ${p.flags ?? ''} keys ${k} v ${bot.entity.velocity.x.toFixed(3)},${bot.entity.velocity.y.toFixed(3)},${bot.entity.velocity.z.toFixed(3)}`);
       }
       write(name, p);
     };
@@ -162,9 +165,9 @@ export async function runScenarios(
   };
   const base: VanillaOptions = { version, dir: options.dir, acceptEula: true, flat: options.flat ?? true, log };
   if (options.grim) {
-    const [paper, grim] = await Promise.all([paperJar(version, options.dir), grimJar(version, options.dir)]);
+    const [paper, grim, flight] = await Promise.all([paperJar(version, options.dir), grimJar(version, options.dir), flightPluginJar(options.dir)]);
     console.log(`  ${path.basename(paper)} + GrimAC ${grim.version}`);
-    server = await startVanilla({ ...base, jar: paper, plugins: [grim.file], name: `paper-grim-${version}` });
+    server = await startVanilla({ ...base, jar: paper, plugins: [grim.file, flight], name: `paper-grim-${version}` });
     // Every violation, not just the ones past the alert threshold.
     const config = path.join(options.dir, 'servers', `paper-grim-${version}`, 'plugins', 'GrimAC', 'config.yml');
     await writeFile(config, (await readFile(config, 'utf8')).replace(/verbose:\n(\s+)print-to-console: false/, 'verbose:\n$1print-to-console: true'));
@@ -199,6 +202,7 @@ export async function runScenarios(
         bot,
         server,
         version,
+        paper: Boolean(options.grim),
         cmd,
         base,
         sleep,

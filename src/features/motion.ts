@@ -9,6 +9,7 @@ import * as conv from '../conv.js';
 import { readVarInt } from '../decode.js';
 import { fleetTicker, TICK_MS } from '../ticker.js';
 import type { ControlState, ControlStates } from '../types.js';
+import { abilitiesPacket, defaultAbilities, parseAbilities, sameAbilities, simulateFlying, type Abilities } from './flight.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- protocol packets and prismarine-physics are untyped */
 
@@ -36,6 +37,10 @@ export interface MotionApi {
   setControlState(control: ControlState, state: boolean): void;
   clearControlStates(): void;
   look(yaw: number, pitch: number, force: boolean): Promise<void>;
+  /** What the server lets the bot do; `flying` follows the bot's own flight too. */
+  readonly abilities: Abilities;
+  /** Starts or stops flying from the next tick (see PosseBot.setFlying). */
+  setFlying(flying: boolean): Promise<void>;
   /**
    * Resolves once the next tick has sent the bot's position and rotation (at once when nothing is
    * being sent: before the server placed the bot, while dead, or outside the play state). Actions
@@ -69,6 +74,12 @@ function serverboundTypes(version: string): Record<string, any> {
 
 function serverboundPacket(version: string, name: string): boolean {
   return serverboundTypes(version)[`packet_${name}`] !== undefined;
+}
+
+/** Whether the client's `abilities` packet carries both speeds (before 1.16) or only the flags. */
+export function abilitiesWithSpeeds(version: string): boolean {
+  const fields = serverboundTypes(version).packet_abilities?.[1] as Array<{ name: string }> | undefined;
+  return fields?.some((f) => f.name === 'flyingSpeed') ?? false;
 }
 
 /** `entity_action` action names this version knows. */
@@ -132,6 +143,44 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
   const velocityInBlocks = velocityIsLpVec3(bot.version);
   const entityActions = actionNames(bot.version);
   const sendsInput = serverboundPacket(bot.version, 'player_input') && bot.registry.version['>=']('1.21.2');
+  // Before 1.16 the client's abilities packet carries every flag and both speeds.
+  const withSpeeds = abilitiesWithSpeeds(bot.version);
+  const abilities = defaultAbilities();
+  /** setFlying calls waiting for the next tick. */
+  const flightRequests: Array<{ flying: boolean; resolve: () => void; reject: (err: Error) => void }> = [];
+  /** Taking off from the ground this tick: the game jumps when flight starts there. */
+  let takeoff = false;
+  const emitAbilities = (): void => {
+    bot.emit('abilities');
+  };
+  /**
+   * The bot starts or stops flying on its own (inside the tick, like the game's onUpdateAbilities).
+   * `nextTick` sends the packet at the start of the next tick instead, after this tick's movement.
+   */
+  const setOwnFlight = (flying: boolean, nextTick = false): void => {
+    if (abilities.flying === flying) return;
+    abilities.flying = flying;
+    const packet = abilitiesPacket(abilities, withSpeeds);
+    if (nextTick) tickQueue.push(['abilities', packet]);
+    else client.write('abilities', packet);
+    settling = Math.max(settling, MAX_SETTLE_TICKS);
+    stillTicks = 0;
+    emitAbilities();
+  };
+  const rejectFlightRequests = (why: string): void => {
+    for (const r of flightRequests.splice(0)) r.reject(new Error(why));
+  };
+  const applyFlightRequests = (): void => {
+    for (const r of flightRequests.splice(0)) {
+      if (r.flying && !abilities.allowFlying) {
+        r.reject(new Error('Flight is not allowed: the server has not given this bot flight (e.g. /fly)'));
+        continue;
+      }
+      if (r.flying && !abilities.flying && bot.entity.onGround) takeoff = true;
+      setOwnFlight(r.flying);
+      r.resolve();
+    }
+  };
 
   // The sprint key (controls.sprint) only asks to sprint; like the game, the bot sprints while it also
   // moves forward and isn't hungry, sneaking, using an item, against a wall or wading, and says so
@@ -153,8 +202,11 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
   };
   const updateSprint = (): void => {
     const e = bot.entity as any;
-    const hungry = bot.game.gameMode !== 'creative' && bot.game.gameMode !== 'spectator' && typeof bot.food === 'number' && bot.food <= 6;
-    const slowed = controls.sneak || bot.usingHeldItem;
+    // A bot that may fly can sprint hungry (the game's hasEnoughFoodToStartSprinting).
+    const hungry =
+      bot.game.gameMode !== 'creative' && bot.game.gameMode !== 'spectator' && !abilities.allowFlying && typeof bot.food === 'number' && bot.food <= 6;
+    // From 1.14 sneaking while flying is no crouch: it only descends.
+    const slowed = (controls.sneak && !(abilities.flying && crouchPose)) || bot.usingHeldItem;
     const wading = Boolean(e.isInWater) && bot.blockAt(e.position.offset(0, 1.62, 0))?.name !== 'water';
     const blocked = Boolean(e.isCollidedHorizontally) || wading;
     if (sprinting && (!controls.forward || hungry || slowed || blocked)) setSprinting(false);
@@ -175,7 +227,7 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
       if (action && entityActions.has(action)) client.write('entity_action', { entityId: bot.entity.id, actionId: action, jumpBoost: 0 });
       if (control === 'sprint' && !state && sprinting) setSprinting(false);
       // Crouching lowers the eyes (1.27 from 1.14, 1.54 before): looking and ray casts aim from them.
-      if (control === 'sneak') (bot.entity as any).eyeHeight = state ? (bot.registry.version['>=']('1.14') ? 1.27 : 1.54) : 1.62;
+      if (control === 'sneak') (bot.entity as any).eyeHeight = state && !(abilities.flying && crouchPose) ? (crouchPose ? 1.27 : 1.54) : 1.62;
       if (sendsInput) {
         client.write('player_input', {
           inputs: {
@@ -208,6 +260,17 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
       pendingLook?.resolve();
       return new Promise((resolve) => (pendingLook = { resolve }));
     },
+    abilities,
+    setFlying(flying) {
+      if (flying && !abilities.allowFlying) {
+        return Promise.reject(new Error('Flight is not allowed: the server has not given this bot flight (e.g. /fly)'));
+      }
+      if (!active || !unsubscribe || client.state !== 'play' || !bot.entity?.position) {
+        return Promise.reject(new Error('The bot is not in the world yet'));
+      }
+      if (abilities.flying === flying && flightRequests.length === 0) return Promise.resolve();
+      return new Promise((resolve, reject) => flightRequests.push({ flying, resolve, reject }));
+    },
     afterTick() {
       if (!active || !unsubscribe || client.state !== 'play') return Promise.resolve();
       return new Promise((resolve) => tickWaiters.push(resolve));
@@ -220,6 +283,7 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
       pendingLook?.resolve();
       pendingLook = null;
       flushTickWaiters();
+      rejectFlightRequests('The connection ended');
     },
   };
 
@@ -263,7 +327,7 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
 
   const needsPhysics = (): boolean => {
     if (!api.enabled || !physicsAllowed) return false;
-    if (anyControl() || settling > 0) return true;
+    if (anyControl() || settling > 0 || takeoff) return true;
     const v = bot.entity.velocity;
     // Standing, the game keeps a small downward velocity (gravity, cancelled by the ground).
     return Math.abs(v.x) > 1e-4 || Math.abs(v.z) > 1e-4 || (!bot.entity.onGround && Math.abs(v.y) > 1e-4);
@@ -278,15 +342,29 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
     const entity = bot.entity as any;
     entity.effects ??= {};
     entity.attributes ??= {};
-    const sprint = airSprintLags && !bot.entity.onGround ? airSprint : sprinting;
-    const state = new PlayerState(bot, { ...controls, sprint, sneak: crouchPose ? crouching : controls.sneak });
-    physics.simulatePlayer(state, world).apply(bot);
+    if (abilities.flying) {
+      // The flying acceleration reads the sprint state of this tick; the keys are the ones held now.
+      const state = new PlayerState(bot, { ...controls, sprint: sprinting });
+      simulateFlying(physics, state, world, abilities.flySpeed, { sprinting, sneakSlows: !crouchPose, takeoff });
+      state.apply(bot);
+      takeoff = false;
+      // Like the game, landing ends the flight. The server hears it after the landing movement: an
+      // anticheat that trusts flying movement (Grim) otherwise checks the landing as a walk that
+      // started at the flight's speed, and flags it.
+      if (bot.entity.onGround) setOwnFlight(false, true);
+    } else {
+      const sprint = airSprintLags && !bot.entity.onGround ? airSprint : sprinting;
+      const state = new PlayerState(bot, { ...controls, sprint, sneak: crouchPose ? crouching : controls.sneak });
+      physics.simulatePlayer(state, world).apply(bot);
+    }
     api.physicsTicks++;
     if (bot.listenerCount('physicsTick') > 0) bot.emit('physicsTick');
     if (settling > 0) {
       settling--;
       const v = bot.entity.velocity;
-      const still = bot.entity.onGround && Math.abs(v.x) < 1e-3 && Math.abs(v.z) < 1e-3 && !anyControl();
+      // A flyer settles hovering: once its vertical velocity has died away too.
+      const resting = bot.entity.onGround || (abilities.flying && Math.abs(v.y) < 1e-3);
+      const still = resting && Math.abs(v.x) < 1e-3 && Math.abs(v.z) < 1e-3 && !anyControl();
       stillTicks = still ? stillTicks + 1 : 0;
       if (stillTicks >= SETTLE_TICKS) {
         settling = 0;
@@ -359,9 +437,11 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
     }
     try {
       flushTickQueue();
+      if (flightRequests.length > 0) applyFlightRequests();
       updateSprint();
       if (needsPhysics()) simulate();
-      crouching = controls.sneak;
+      takeoff = false;
+      crouching = controls.sneak && !abilities.flying;
       airSprint = sprinting;
       updatePosition(performance.now());
       if (tickEnd) client.write('tick_end', {});
@@ -432,6 +512,18 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
     finish();
   });
 
+  // What the server lets the bot do; it may start or stop the flight itself (e.g. /fly off).
+  client.on('abilities', (packet: any) => {
+    const next = parseAbilities(packet);
+    if (sameAbilities(next, abilities)) return;
+    if (next.flying !== abilities.flying) {
+      settling = Math.max(settling, MAX_SETTLE_TICKS);
+      stillTicks = 0;
+    }
+    Object.assign(abilities, next);
+    emitAbilities();
+  });
+
   // 1.21.3+
   client.on('player_rotation', (packet: any) => {
     bot.entity.yaw = conv.fromNotchianYaw(packet.yaw);
@@ -468,6 +560,7 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
     active = false;
     respawnAt = Date.now();
     flushTickWaiters();
+    rejectFlightRequests('The bot died');
   });
   bot.on('respawn', () => {
     active = false;
@@ -477,6 +570,9 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
     active = false;
     generation++;
     flushTickWaiters();
+    rejectFlightRequests('The bot joined another world');
+    Object.assign(abilities, defaultAbilities());
+    takeoff = false;
     bot.entity.position = new Vec3(0, 0, 0);
     bot.entity.velocity = new Vec3(0, 0, 0);
   });

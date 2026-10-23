@@ -131,6 +131,13 @@ export function installFishing(bot: PosseBot): FishingApi {
 
   const legacyCast = bot.registry.version['<']('1.12');
 
+  // A cast or reel is a single right-click: the rod is never "in use" (the game's isUsingItem stays
+  // false), so the bot isn't left unable to sprint.
+  const castOrReel = (): void => {
+    bot.activateItem();
+    bot.usingHeldItem = false;
+  };
+
   const fish = async (options: FishOptions = {}): Promise<void> => {
     cancel?.(new Error('Fishing cancelled: fish() was called again'));
     if (options.at) {
@@ -152,7 +159,7 @@ export function installFishing(bot: PosseBot): FishingApi {
         for (const t of timers) clearTimeout(t);
         for (const u of undo) u();
         cancel = null;
-        if (reel && bobber) bot.activateItem();
+        if (reel && bobber) castOrReel();
         bobber = null;
         if (err) reject(err);
         else resolve();
@@ -210,7 +217,7 @@ export function installFishing(bot: PosseBot): FishingApi {
         timers.push(setTimeout(() => finish(new Error('Fishing timed out without a bite'), true), options.timeout));
       }
 
-      bot.activateItem();
+      castOrReel();
     });
   };
 

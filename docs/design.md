@@ -2,7 +2,7 @@
 
 Status: implemented (2026-10-22); 0.3 adds digging, building, crafting, trading, books,
 enchanting, a physics simulator and a pathfinder (2026-10-22), verified against vanilla servers on
-1.8.9, 1.12.2, 1.16.5, 1.20.4, 1.21.4 and 26.1 (`bench/live-*.ts`).
+1.8.9, 1.12.2, 1.16.5, 1.20.4, 1.21.4 and 26.1 (`bench/live-*.ts`); 0.6 adds flight (2026-10-23).
 
 ## Problem
 
@@ -99,6 +99,9 @@ No per-bot physics loop. The fleet ticker drives every bot:
   until the bot is on the ground and still, so it never floats and gets kicked for flying;
 - **moving**: while a control state is set (`setControlState`), physics runs each tick.
 
+A flying bot hovers like an idle one: once its velocity has died away (×0.6 a tick vertically,
+×0.91 sideways) physics stops until a control is pressed.
+
 ### Entities
 
 `entities: 'players' | 'all' | 'none'` (default `'players'`). Other players are tracked with
@@ -191,6 +194,37 @@ ticks)` and `simulateUntil(state, goal, controller)`. Effect levels and armour a
 state instead of every tick. mineflayer-physics-util (the more accurate Botcraft port that
 minecraft-pathfinding uses) is GPL-3.0, so it is neither copied nor depended on: Posse and the
 products built on it stay MIT-compatible.
+
+## Flight (0.6)
+
+`src/features/flight.ts`. The server's `abilities` packet (always decoded: tiny and rare) is kept in
+`bot.abilities` (`allowFlying` from `/fly` or creative, `flying`, `flySpeed`, `walkSpeed`) and
+announced with an `abilities` event. `bot.setFlying(on)` starts or stops flying from the next tick,
+the way the game does on a double jump: the abilities packet goes out inside the tick before that
+tick's movement (1.8–1.15: every flag and both speeds; 1.16+: the flying bit), and taking off from
+the ground jumps (0.42). It rejects when flight isn't allowed.
+
+prismarine-physics has no flight, so a flying tick (motion and `Simulator.step` alike) runs its
+normal movement with the game's flying values (LocalPlayer.aiStep and Player.travel; before 1.13
+EntityPlayerSP.onLivingUpdate and EntityPlayer.moveEntityWithHeading):
+
+- jump/sneak push the vertical velocity by `flySpeed × 3` (float) before the tick, both cancel;
+- in the air the horizontal acceleration is `flySpeed`, doubled sprinting (it replaces the
+  airborne 0.02 and its sprint bonus), with the air friction 0.91; on the ground the ground speed;
+- after the move the vertical velocity is 0.6 × what it was when the move started (no gravity);
+- sneaking slows a flyer sideways only before 1.14 (from 1.14 sneak is a pose a flyer doesn't
+  take); a bot that may fly sprints hungry, as the game allows;
+- landing (on the ground after the move) ends the flight.
+
+Steady speeds match the game: 10.89 blocks/s forward (21.78 sprinting) and 7.5 blocks/s up or down
+at the default fly speed.
+
+Grim does not simulate flying ticks (it takes the movement as given and starts the next walking
+tick from it), so the risk is at the changes. Taking off and stopping in the air (even while
+rising) pass as the game sends them. The landing is told after the landing movement, at the start
+of the next tick: told before it, Grim checks the landing as a walk from the flight's speed and
+flags it (Simulation, ~0.1). Other entities' `onGround` is kept from their movement packets, so a
+watcher can tell a flying player from a walking one.
 
 ## Pathfinding (0.3)
 
@@ -287,14 +321,17 @@ bot's packets differed from the game's. Each is now done the game's way:
 
 After this every course (walk, around, tunnel, stairs, drop, parkour, bridge, pillar, digdown,
 door, swim, ladder, nopath, follow, far) runs without a single Grim violation on Paper 1.8.8 and
-1.21.4.
+1.21.4. So does flight (`bench/live-features.ts --grim --only fly`: survival flight granted by a
+tiny bundled plugin, `bench/flightPlugin.ts`, the way a factions `/fly` grants it): take-off,
+hovering, rising, flying and sprinting, landing by sinking, and stopping while rising.
 
 ## Verification
 
 - Unit tests for decoding, every version branch (packet fixtures generated from minecraft-data),
   the world store, the view kernel, every new serverbound packet on ten versions (serialized with
   minecraft-protocol), recipes, ray casts, goals, the search and move generation on synthetic
-  worlds, and the simulator.
+  worlds, the simulator, and flight (the abilities packet both ways on every version, and the
+  flying speeds against the game's values).
 - `bench/live-features.ts` and `bench/live-pathfinder.ts` run against Mojang's vanilla server
   (`bench/vanilla.ts` downloads and runs it; `--accept-eula`): dig, place (also against a chest),
   craft (2×2 and table), chests, furnaces, books, enchanting, trading, eating, ray casts, doors;

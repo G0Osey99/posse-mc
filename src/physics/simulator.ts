@@ -3,6 +3,7 @@
 // they'll land. Runs prismarine-physics (MIT) on a copied player state, with the effect levels and
 // armour read once instead of every tick.
 import { createPhysics } from '../features/motion.js';
+import { simulateFlying } from '../features/flight.js';
 import { Vec3 } from 'vec3';
 import type { PosseBot } from '../bot.js';
 import { enchantsOf } from '../items.js';
@@ -36,6 +37,10 @@ export interface SimState {
   levitation: number;
   depthStrider: number;
   elytraEquipped: boolean;
+  /** Flying (`/fly`, creative): jump rises, sneak sinks; landing ends it. */
+  flying: boolean;
+  /** The flying acceleration (`abilities.flySpeed`, 0.05 by default). */
+  flySpeed: number;
 }
 
 export interface SimulationResult {
@@ -65,11 +70,14 @@ const effectLevel = (registry: any, name: string, effects: Record<number, { ampl
 export class Simulator {
   private readonly physics: any;
   private readonly world: { getBlock: (pos: Vec3) => unknown };
+  /** Before 1.14 sneaking also slows a flyer sideways (sneak was a key, not a pose). */
+  private readonly sneakSlowsFlight: boolean;
 
   constructor(private readonly bot: PosseBot) {
     const kit = bot.kit as any;
     this.physics = kit.sharedPhysics ?? (kit.sharedPhysics = createPhysics(kit.Physics, kit.registry));
     this.world = { getBlock: (pos: Vec3) => bot.blockAt(pos) };
+    this.sneakSlowsFlight = Boolean((bot.registry as any)?.version?.['<']?.('1.14'));
   }
 
   /** The bot's current state, with the given controls (default: what it's pressing now). */
@@ -107,6 +115,8 @@ export class Simulator {
       levitation: effectLevel(registry, 'Levitation', e.effects),
       depthStrider: enchantsOf(bot.registry, boots).find((x) => x.name === 'depth_strider')?.lvl ?? 0,
       elytraEquipped: chest?.name === 'elytra',
+      flying: Boolean(bot.abilities?.flying),
+      flySpeed: bot.abilities?.flySpeed ?? 0.05,
     };
   }
 
@@ -115,9 +125,17 @@ export class Simulator {
     return { ...state, pos: state.pos.clone(), vel: state.vel.clone(), control: { ...state.control }, attributes: copyAttributes(state.attributes) };
   }
 
-  /** Advances a state by one tick, in place. */
+  /**
+   * Advances a state by one tick, in place. A flying state flies (the sprint control counts as
+   * sprinting) and stops flying when it lands.
+   */
   step(state: SimState): SimState {
-    this.physics.simulatePlayer(state, this.world);
+    if (state.flying) {
+      simulateFlying(this.physics, state, this.world, state.flySpeed, { sprinting: state.control.sprint, sneakSlows: this.sneakSlowsFlight });
+      if (state.onGround) state.flying = false;
+    } else {
+      this.physics.simulatePlayer(state, this.world);
+    }
     return state;
   }
 

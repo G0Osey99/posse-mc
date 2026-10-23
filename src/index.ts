@@ -21,3 +21,4 @@ export type { FishOptions } from './features/fishing.js';
 export { castAngles, isBiteParticle } from './features/fishing.js';
 export type { FindBlocksOptions } from './features/findBlocks.js';
 export type { RaycastBlock } from './features/raycast.js';
+export type { Abilities } from './features/flight.js';

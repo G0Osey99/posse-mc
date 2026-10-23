@@ -232,10 +232,15 @@ export function installPlayers(bot: PosseBot, tracking: EntityTracking, spawns: 
     if (bot.listenerCount('entityMoved') > 0) bot.emit('entityMoved', entity);
   };
   const delta = sf('fixedPointDelta') ? 32 : 128 * 32;
+  // Every movement packet says whether the entity is on the ground (walking or flying, for players).
+  const setOnGround = (entity: Entity, packet: any): void => {
+    if (typeof packet.onGround === 'boolean' && entity !== bot.entity) entity.onGround = packet.onGround;
+  };
   client.on('rel_entity_move', (packet: any) => {
     const entity = bot.entities[packet.entityId];
     if (!entity) return;
     entity.position.translate(packet.dX / delta, packet.dY / delta, packet.dZ / delta);
+    setOnGround(entity, packet);
     moved(entity);
   });
   client.on('entity_move_look', (packet: any) => {
@@ -244,6 +249,7 @@ export function installPlayers(bot: PosseBot, tracking: EntityTracking, spawns: 
     entity.position.translate(packet.dX / delta, packet.dY / delta, packet.dZ / delta);
     entity.yaw = conv.fromNotchianYawByte(packet.yaw);
     entity.pitch = conv.fromNotchianPitchByte(packet.pitch);
+    setOnGround(entity, packet);
     moved(entity);
   });
   client.on('entity_look', (packet: any) => {
@@ -251,12 +257,14 @@ export function installPlayers(bot: PosseBot, tracking: EntityTracking, spawns: 
     if (!entity) return;
     entity.yaw = conv.fromNotchianYawByte(packet.yaw);
     entity.pitch = conv.fromNotchianPitchByte(packet.pitch);
+    setOnGround(entity, packet);
     moved(entity);
   });
   client.on('entity_teleport', (packet: any) => {
     const entity = bot.entities[packet.entityId];
     if (!entity) return;
     teleport(entity, packet);
+    setOnGround(entity, packet);
     moved(entity);
   });
   client.on('sync_entity_position', (packet: any) => {
@@ -265,6 +273,7 @@ export function installPlayers(bot: PosseBot, tracking: EntityTracking, spawns: 
     entity.position.set(packet.x, packet.y, packet.z);
     entity.yaw = conv.fromNotchianYaw(packet.yaw);
     entity.pitch = conv.fromNotchianPitch(packet.pitch);
+    setOnGround(entity, packet);
     moved(entity);
   });
   client.on('entity_head_rotation', (packet: any) => {

@@ -1,5 +1,5 @@
 // Live checks of digging, placing, crafting, containers, furnaces, books, enchanting, trading,
-// eating, fishing, block search and ray casts against a vanilla server (see liveHarness.ts).
+// eating, fishing, block search, ray casts and flight against a vanilla server (see liveHarness.ts).
 //
 //   tsx bench/live-features.ts --accept-eula [--versions 1.21.4] [--only dig,craft] [--verbose]
 import { Vec3 } from 'vec3';
@@ -290,6 +290,93 @@ const scenarios: Record<string, Scenario> = {
     await setAndWait(ctx, pos, 'oak_trapdoor');
     await bot.activateBlock(bot.blockAt(pos)!);
     await ctx.waitFor(() => (bot.blockAt(pos)?.getProperties() as { open?: boolean }).open === true, 3000, 'the trapdoor to open');
+  },
+
+  // Survival flight, like a factions /fly (Paper: the posseflight plugin; vanilla: creative mode).
+  async fly(ctx) {
+    const { bot, cmd } = ctx;
+    const grant = async (on: boolean): Promise<void> => {
+      if (ctx.paper) await ctx.server.run(`posseflight PosseLive ${on ? 'on' : 'off'}`, /posseflight:/);
+      else cmd.gamemode(on ? 'creative' : 'survival');
+      await ctx.waitFor(() => bot.abilities.allowFlying === on, 5000, `flight ${on ? 'allowed' : 'taken away'}`);
+    };
+    const rejects = async (): Promise<void> => {
+      const err = await bot.setFlying(true).then(() => null, (e: Error) => e);
+      if (!err || !/not allowed/i.test(err.message)) throw new Error(`setFlying(true) without flight: ${err?.message ?? 'resolved'}`);
+    };
+    if (bot.abilities.allowFlying) await grant(false);
+    await rejects();
+    await grant(true);
+    // An anticheat setback teleports the bot back: none allowed.
+    let setbacks = 0;
+    const onForced = (): void => {
+      setbacks++;
+    };
+    bot.on('forcedMove', onForced);
+    const hold = async (keys: Array<'jump' | 'sneak' | 'forward' | 'sprint'>, ms: number): Promise<void> => {
+      for (const k of keys) bot.setControlState(k, true);
+      await ctx.sleep(ms);
+      for (const k of keys) bot.setControlState(k, false);
+    };
+    // POSSE_GRIM_DEBUG=1: Grim's predicted (P) and actual (A) movement of every tick, from /grim debug.
+    if (process.env.POSSE_GRIM_DEBUG) {
+      bot.on('messagestr', (m) => console.log(`    [chat] ${m}`));
+      bot.chat('/grim debug');
+      await ctx.sleep(500);
+    }
+    try {
+      // Using an item blocks sprinting (an earlier scenario may have left a rod in use).
+      if (bot.usingHeldItem) bot.deactivateItem();
+      await bot.look(0, 0, true);
+      const ground = bot.entity.position.y;
+      await bot.setFlying(true);
+      if (!bot.abilities.flying) throw new Error('not flying after setFlying(true)');
+      await ctx.waitFor(() => !bot.entity.onGround, 2000, 'take-off');
+      await ctx.sleep(1000);
+      const hoverY = bot.entity.position.y;
+      await ctx.sleep(1500);
+      ctx.log(`take-off to ${(hoverY - ground).toFixed(3)} above the ground, drift ${(bot.entity.position.y - hoverY).toFixed(4)}`);
+      if (Math.abs(bot.entity.position.y - hoverY) > 0.01) throw new Error(`hovering drifted ${bot.entity.position.y - hoverY}`);
+      if (!bot.abilities.flying) throw new Error('stopped flying while hovering');
+
+      const y0 = bot.entity.position.y;
+      await hold(['jump'], 1000);
+      await ctx.sleep(500);
+      ctx.log(`rose ${(bot.entity.position.y - y0).toFixed(2)}`);
+      if (bot.entity.position.y - y0 < 5) throw new Error(`rose only ${bot.entity.position.y - y0}`);
+
+      const z0 = bot.entity.position.z;
+      await hold(['forward'], 1000);
+      const walked = z0 - bot.entity.position.z;
+      const z1 = bot.entity.position.z;
+      await hold(['forward', 'sprint'], 1000);
+      const sprinted = z1 - bot.entity.position.z;
+      await ctx.sleep(1000);
+      ctx.log(`flew ${walked.toFixed(2)} in 1 s, ${sprinted.toFixed(2)} sprinting`);
+      // From rest: about 6.3 blocks in the first 20 ticks (10.9 blocks/s once at speed), twice that sprinting.
+      if (walked < 5 || sprinted < 14) throw new Error(`flew ${walked} / ${sprinted} blocks`);
+
+      bot.setControlState('sneak', true);
+      await ctx.waitFor(() => bot.entity.onGround && !bot.abilities.flying, 15_000, 'landing');
+      bot.setControlState('sneak', false);
+      await ctx.sleep(1000);
+
+      // Stopping in the air falls (from under 3 blocks: no damage).
+      await bot.setFlying(true);
+      await ctx.waitFor(() => !bot.entity.onGround, 2000, 'second take-off');
+      bot.setControlState('jump', true);
+      await ctx.sleep(150);
+      await bot.setFlying(false); // while still rising
+      bot.setControlState('jump', false);
+      await ctx.waitFor(() => bot.entity.onGround, 5000, 'falling to the ground');
+      await ctx.sleep(1000);
+      if (setbacks > 0) throw new Error(`${setbacks} setback(s) from the server`);
+    } finally {
+      bot.off('forcedMove', onForced);
+      bot.clearControlStates();
+    }
+    await grant(false);
+    await rejects();
   },
 };
 
