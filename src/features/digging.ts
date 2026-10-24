@@ -14,6 +14,8 @@ import { targetShapes } from './raycast.js';
 const SWING_MS = 350;
 /** Blocks from the eyes to a block's centre the server accepts for digging. */
 export const DIG_REACH = 5.1;
+/** The game's destroy delay between two blocks (5 ticks), with a little slack. */
+const DESTROY_DELAY_MS = 300;
 
 /** `auto`: the face the bot sees (or faces); `raycast`: only a visible face; a vector: that face. */
 export type DigFace = 'auto' | 'raycast' | Vec3;
@@ -155,6 +157,11 @@ export function installDigging(bot: PosseBot): DiggingApi {
     }
     // The game cancels the block it was digging when another one comes under the crosshair.
     if (current) stopDigging();
+    // After breaking a block the game waits 5 ticks before it starts on the next (Grim's FastBreak).
+    if (bot.lastDigTime !== null) {
+      const since = performance.now() - bot.lastDigTime;
+      if (since < DESTROY_DELAY_MS) await new Promise((r) => setTimeout(r, DESTROY_DELAY_MS - since));
+    }
 
     await new Promise<void>((resolve, reject) => {
       const record = { block, face, timer: null as NodeJS.Timeout | null, swing: null as NodeJS.Timeout | null, unwatch: null as (() => void) | null, reject };
