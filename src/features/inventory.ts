@@ -6,7 +6,6 @@ import minecraftData from 'minecraft-data';
 import nbt from 'prismarine-nbt';
 import { Vec3 } from 'vec3';
 import type { PosseBot } from '../bot.js';
-import * as conv from '../conv.js';
 import type { Block, Entity, Item, Window } from '../types.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- prismarine-windows/items and packets are loosely typed */
@@ -25,6 +24,15 @@ export function clickUsesHashedSlots(version: string): boolean {
   const types = (minecraftData(version)?.protocol as any)?.play?.toServer?.types;
   return JSON.stringify(types?.packet_window_click ?? '').includes('HashedSlot');
 }
+/** Items used over time (they slow the player while held up), besides food. */
+const USED_OVER_TIME = /^(bow|crossbow|shield|trident|spyglass|goat_horn|brush|potion|milk_bucket|honey_bottle|ominous_bottle)$/;
+/** True for items held up while used (they slow the player): food, potions, bows, shields… */
+export function isUsedOverTime(name: string, metadata: number, food: boolean): boolean {
+  // A splash potion before 1.9 is a potion with bit 0x4000 of the data value: thrown at once.
+  if (name === 'potion' && (metadata & 0x4000) !== 0) return false;
+  return food || USED_OVER_TIME.test(name);
+}
+
 const QUICK_BAR_START = 36;
 const QUICK_BAR_COUNT = 9;
 
@@ -557,9 +565,14 @@ export function installInventory(bot: PosseBot): InventoryApi {
     bot.updateHeldItem();
   };
 
+  const usedOverTime = (item: Item | null | undefined): boolean =>
+    !!item && isUsedOverTime(item.name, item.metadata, Boolean((bot.registry as unknown as { foodsByName?: Record<string, unknown> }).foodsByName?.[item.name]));
+
   const activateItem = (offHand = false): void => {
     // Sent with an empty hand too (unlike mineflayer): some servers open menus on any right-click.
-    bot.usingHeldItem = Boolean(offHand ? bot.inventory.slots[45] : bot.heldItem);
+    // Only items used over time (food, potions, bows, shields…) slow the player down meanwhile; a
+    // bucket, a pearl or a rod is used at once.
+    bot.usingHeldItem = usedOverTime(offHand ? bot.inventory.slots[45] : bot.heldItem);
     if (sf('useItemWithBlockPlace')) {
       client.write('block_place', {
         location: new Vec3(-1, 255, -1),
@@ -573,7 +586,11 @@ export function installInventory(bot: PosseBot): InventoryApi {
       client.write('use_item', {
         hand: offHand ? 1 : 0,
         sequence: bot._nextSequence(),
-        rotation: { x: conv.toNotchianYaw(bot.entity?.yaw ?? 0), y: conv.toNotchianPitch(bot.entity?.pitch ?? 0) },
+        // The rotation the movement packets carry, exactly (anticheats compare them: Grim's BadPacketsJ).
+        rotation: (() => {
+          const sent = bot.sentRotation();
+          return { x: sent.yaw, y: sent.pitch };
+        })(),
       });
     }
   };
@@ -640,6 +657,25 @@ export function installInventory(bot: PosseBot): InventoryApi {
     return slot;
   };
 
+  /**
+   * Clicks in the player's own inventory happen with its screen open: the game takes no movement
+   * keys then, and anticheats flag inventory clicks while moving (Grim's MultiActionsC). Keys held
+   * now count as let go for a tick first, and come back after.
+   */
+  const inInventoryScreen = async <T>(fn: () => Promise<T>): Promise<T> => {
+    if (bot.currentWindow) return fn();
+    const moving = (['forward', 'back', 'left', 'right', 'jump'] as const).some((k) => bot.getControlState(k));
+    // The server knows the keys from the ticks it got: they must have been up for two of them.
+    if (!moving && bot.idleInputTicks >= 2) return fn();
+    const release = bot.holdInput();
+    try {
+      for (let i = 0; i < 5 && bot.idleInputTicks < 2; i++) await bot.afterTick();
+      return await fn();
+    } finally {
+      release();
+    }
+  };
+
   const equip = async (itemOrType: Item | number, destination: Destination | null): Promise<void> => {
     const inv = bot.inventory as any;
     const item: any = typeof itemOrType === 'number' ? inv.findInventoryItem(itemOrType) : itemOrType;
@@ -649,7 +685,7 @@ export function installInventory(bot: PosseBot): InventoryApi {
     let destSlot = equipmentSlot(dest);
     if (sourceSlot === destSlot) return;
     if (dest !== 'hand') {
-      await moveSlotItem(sourceSlot, destSlot);
+      await inInventoryScreen(() => moveSlotItem(sourceSlot, destSlot));
       return;
     }
     const inHotbar = (s: number): boolean => s >= QUICK_BAR_START && s < QUICK_BAR_START + QUICK_BAR_COUNT;
@@ -663,7 +699,7 @@ export function installInventory(bot: PosseBot): InventoryApi {
       nextQuickBarSlot = (nextQuickBarSlot + 1) % QUICK_BAR_COUNT;
     }
     setQuickBarSlot(destSlot - QUICK_BAR_START);
-    await moveSlotItem(sourceSlot, destSlot);
+    await inInventoryScreen(() => moveSlotItem(sourceSlot, destSlot));
   };
 
   const unequip = async (destination: Destination): Promise<void> => {

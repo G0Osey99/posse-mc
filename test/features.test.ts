@@ -4,7 +4,7 @@ import { clockTime } from '../src/bot.js';
 import { installChat, parseComponent } from '../src/features/chat.js';
 import { tpsFrom } from '../src/features/serverHealth.js';
 import { chatLoader, connectionRegistry } from '../src/registry.js';
-import { clickUsesHashedSlots, normalizeWindowTitle, playerInventorySlotToWindow } from '../src/features/inventory.js';
+import { clickUsesHashedSlots, isUsedOverTime, normalizeWindowTitle, playerInventorySlotToWindow } from '../src/features/inventory.js';
 import { actionNames, deltaYaw, touchesBot, velocityIsLpVec3 } from '../src/features/motion.js';
 import { extractSkin } from '../src/features/players.js';
 import { spawnTypeFilter } from '../src/features/spawns.js';
@@ -25,6 +25,15 @@ describe('chat', () => {
 });
 
 describe('inventory', () => {
+  it('slows the player only for items used over time', () => {
+    expect(isUsedOverTime('bread', 0, true)).toBe(true);
+    expect(isUsedOverTime('bow', 0, false)).toBe(true);
+    expect(isUsedOverTime('potion', 8197, false)).toBe(true);
+    expect(isUsedOverTime('potion', 16389, false)).toBe(false);
+    expect(isUsedOverTime('water_bucket', 0, false)).toBe(false);
+    expect(isUsedOverTime('ender_pearl', 0, false)).toBe(false);
+  });
+
   it('turns NBT window titles into JSON components', () => {
     expect(normalizeWindowTitle({ type: 'compound', value: { text: { type: 'string', value: 'Menu' } } })).toBe('{"text":"Menu"}');
     expect(normalizeWindowTitle({ type: 'string', value: 'Menu' })).toBe('{"text":"Menu"}');

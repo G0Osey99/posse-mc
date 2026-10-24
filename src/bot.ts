@@ -826,6 +826,21 @@ export class PosseBot extends EventEmitter {
     return this.motion.look(yaw, pitch, force);
   }
 
+  /** Ticks since the bot last moved with a movement key held. */
+  get idleInputTicks(): number {
+    return this.motion?.idleInputTicks ?? 100;
+  }
+
+  /** Counts the movement keys as let go (as with an inventory screen open) until the returned function is called. */
+  holdInput(): () => void {
+    return this.motion?.holdInput() ?? (() => undefined);
+  }
+
+  /** The rotation (yaw, pitch in degrees, as sent) of the last rotation packet. */
+  sentRotation(): { yaw: number; pitch: number } {
+    return this.motion?.sentRotation() ?? { yaw: 0, pitch: 0 };
+  }
+
   /**
    * What the server lets the bot do (the `abilities` packet): whether it may fly (`/fly`,
    * creative) and is flying, and the speeds. `flying` follows the bot's own flight too.

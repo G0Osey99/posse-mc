@@ -319,6 +319,13 @@ bot's packets differed from the game's. Each is now done the game's way:
 - **Bridging.** The bot stops past the edge of its block before clicking the side under it, so the
   eyes are beyond the clicked face (Grim's PositionPlace) and the near-vertical look still hits it.
 
+- **Using an item (0.6.2).** `use_item` (1.21+) carries the rotation the movement packets carry,
+  exactly (Grim's BadPacketsJ compares them bit for bit). Only items used over time (food, potions,
+  bows, shields, tridents…) slow the bot while held up; a bucket, a pearl or a rod is used at once.
+- **Inventory clicks (0.6.2).** The game takes no movement keys while the inventory screen is open:
+  before clicking in its own inventory (moving an item to the hotbar), the bot's keys count as let
+  go until the server has had two ticks without them (`bot.holdInput()`; Grim's MultiActionsC).
+
 After this every course (walk, around, tunnel, stairs, drop, parkour, bridge, pillar, digdown,
 door, swim, ladder, nopath, follow, far) runs without a single Grim violation on Paper 1.8.8 and
 1.21.4. So does flight (`bench/live-features.ts --grim --only fly`: survival flight granted by a

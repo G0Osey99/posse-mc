@@ -47,6 +47,12 @@ export interface MotionApi {
    * wait for it after a look so the server sees the rotation before the click.
    */
   afterTick(): Promise<void>;
+  /** The rotation (yaw, pitch in degrees) the last rotation packet carried, as sent. */
+  sentRotation(): { yaw: number; pitch: number };
+  /** Counts the movement keys as let go (an inventory screen is open) until the returned function is called. */
+  holdInput(): () => void;
+  /** Ticks since the last one that moved with a movement key held (what the server last saw). */
+  readonly idleInputTicks: number;
   stop(): void;
 }
 
@@ -125,6 +131,10 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
   };
 
   const controls: ControlStates = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
+  /** Held while the inventory is clicked: like the game with a screen open, the movement keys count as let go. */
+  let inputHolds = 0;
+  let idleInputTicks = 100;
+  const input = (): ControlStates => (inputHolds > 0 ? { ...controls, forward: false, back: false, left: false, right: false, jump: false, sprint: false } : controls);
   const lastSent = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0, onGround: false, time: 0, flags: { onGround: false, hasHorizontalCollision: undefined as boolean | undefined } };
   let lastSentYaw = 0;
   let lastSentPitch = 0;
@@ -206,11 +216,20 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
     const hungry =
       bot.game.gameMode !== 'creative' && bot.game.gameMode !== 'spectator' && !abilities.allowFlying && typeof bot.food === 'number' && bot.food <= 6;
     // From 1.14 sneaking while flying is no crouch: it only descends.
+    const keys = input();
     const slowed = (controls.sneak && !(abilities.flying && crouchPose)) || bot.usingHeldItem;
     const wading = Boolean(e.isInWater) && bot.blockAt(e.position.offset(0, 1.62, 0))?.name !== 'water';
     const blocked = Boolean(e.isCollidedHorizontally) || wading;
-    if (sprinting && (!controls.forward || hungry || slowed || blocked)) setSprinting(false);
-    else if (!sprinting && controls.sprint && controls.forward && !hungry && !slowed && !blocked) setSprinting(true);
+    if (sprinting && (!keys.forward || hungry || slowed || blocked)) setSprinting(false);
+    else if (!sprinting && keys.sprint && keys.forward && !hungry && !slowed && !blocked) setSprinting(true);
+  };
+
+  const sendInput = (): void => {
+    if (!sendsInput || !bot.entity || client.state !== 'play') return;
+    const keys = input();
+    client.write('player_input', {
+      inputs: { forward: keys.forward, backward: keys.back, left: keys.left, right: keys.right, jump: keys.jump, shift: keys.sneak, sprint: keys.sprint },
+    });
   };
 
   const api: MotionApi = {
@@ -228,19 +247,18 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
       if (control === 'sprint' && !state && sprinting) setSprinting(false);
       // Crouching lowers the eyes (1.27 from 1.14, 1.54 before): looking and ray casts aim from them.
       if (control === 'sneak') (bot.entity as any).eyeHeight = state && !(abilities.flying && crouchPose) ? (crouchPose ? 1.27 : 1.54) : 1.62;
-      if (sendsInput) {
-        client.write('player_input', {
-          inputs: {
-            forward: controls.forward,
-            backward: controls.back,
-            left: controls.left,
-            right: controls.right,
-            jump: controls.jump,
-            shift: controls.sneak,
-            sprint: controls.sprint,
-          },
-        });
-      }
+      sendInput();
+    },
+    holdInput() {
+      inputHolds++;
+      if (inputHolds === 1) sendInput();
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        inputHolds--;
+        if (inputHolds === 0) sendInput();
+      };
     },
     clearControlStates() {
       for (const key of Object.keys(controls) as ControlState[]) api.setControlState(key, false);
@@ -274,6 +292,12 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
     afterTick() {
       if (!active || !unsubscribe || client.state !== 'play') return Promise.resolve();
       return new Promise((resolve) => tickWaiters.push(resolve));
+    },
+    get idleInputTicks() {
+      return idleInputTicks;
+    },
+    sentRotation() {
+      return { yaw: lastSent.yaw, pitch: lastSent.pitch };
     },
     stop() {
       unsubscribe?.();
@@ -323,7 +347,10 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
     write('position_look', onGround);
   };
 
-  const anyControl = (): boolean => controls.forward || controls.back || controls.left || controls.right || controls.jump;
+  const anyControl = (): boolean => {
+    const keys = input();
+    return keys.forward || keys.back || keys.left || keys.right || keys.jump;
+  };
 
   const needsPhysics = (): boolean => {
     if (!api.enabled || !physicsAllowed) return false;
@@ -344,7 +371,7 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
     entity.attributes ??= {};
     if (abilities.flying) {
       // The flying acceleration reads the sprint state of this tick; the keys are the ones held now.
-      const state = new PlayerState(bot, { ...controls, sprint: sprinting });
+      const state = new PlayerState(bot, { ...input(), sprint: sprinting });
       simulateFlying(physics, state, world, abilities.flySpeed, { sprinting, sneakSlows: !crouchPose, takeoff });
       state.apply(bot);
       takeoff = false;
@@ -354,7 +381,7 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
       if (bot.entity.onGround) setOwnFlight(false, true);
     } else {
       const sprint = airSprintLags && !bot.entity.onGround ? airSprint : sprinting;
-      const state = new PlayerState(bot, { ...controls, sprint, sneak: crouchPose ? crouching : controls.sneak });
+      const state = new PlayerState(bot, { ...input(), sprint, sneak: crouchPose ? crouching : controls.sneak });
       physics.simulatePlayer(state, world).apply(bot);
     }
     api.physicsTicks++;
@@ -444,6 +471,7 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
       crouching = controls.sneak && !abilities.flying;
       airSprint = sprinting;
       updatePosition(performance.now());
+      idleInputTicks = anyControl() ? 0 : Math.min(idleInputTicks + 1, 100);
       if (tickEnd) client.write('tick_end', {});
       flushTickWaiters();
     } catch (err) {
