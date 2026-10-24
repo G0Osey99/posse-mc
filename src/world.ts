@@ -5,6 +5,7 @@ import { Vec3 } from 'vec3';
 import type { Block } from 'prismarine-block';
 import { chunkStore, type ChunkStore, type SharedPayload } from './chunkStore.js';
 import type { VersionKit } from './registry.js';
+import { hasLegacyShape, legacyShapes, type LegacyNeighbor } from './legacyShapes.js';
 
 /** One `Chunk.load` call's arguments, kept until the column is decoded. */
 export interface ChunkLoad {
@@ -281,8 +282,27 @@ export class LazyWorld {
     const local = new Vec3(fx & 15, fy, fz & 15);
     const block = column.getBlock(local) as Block;
     block.position = new Vec3(fx, fy, fz);
+    // Before 1.13 stair corners and fence, pane and wall arms come from the neighbours.
+    if (this.legacy && hasLegacyShape(block.name)) {
+      const shapes = legacyShapes(block.name, block.metadata, (dx, dy, dz) => this.neighbor(fx + dx, fy + dy, fz + dz));
+      if (shapes) (block as unknown as { shapes: number[][] }).shapes = shapes;
+    }
     return block;
   }
+
+  /** A neighbour for legacyShapes (null when not loaded). */
+  private neighbor(x: number, y: number, z: number): LegacyNeighbor | null {
+    const column = this.column(x >> 4, z >> 4);
+    if (!column) return null;
+    const b = column.getBlock(new Vec3(x & 15, y, z & 15)) as Block;
+    return { name: b.name, metadata: b.metadata, shapes: (b as unknown as { shapes: number[][] }).shapes };
+  }
+
+  /** 1.8–1.12: no block states on the wire. */
+  private get legacy(): boolean {
+    return (this.legacyCached ??= !(this.kit.registry as unknown as { supportFeature(f: string): boolean }).supportFeature('blockStateId'));
+  }
+  private legacyCached: boolean | undefined;
 
   /** A block from a state id at a position, for blockUpdate. */
   makeBlock(stateId: number, x: number, y: number, z: number): Block {

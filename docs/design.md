@@ -326,6 +326,12 @@ bot's packets differed from the game's. Each is now done the game's way:
   before clicking in its own inventory (moving an item to the hotbar), the bot's keys count as let
   go until the server has had two ticks without them (`bot.holdInput()`; Grim's MultiActionsC).
 
+- **Neighbour shapes before 1.13 (0.6.2).** 1.8–1.12 send ids and data values only, so stair
+  corners and the arms of fences, panes and walls are the client's to work out (`legacyShapes.ts`,
+  the game's own rules and collision boxes: walls 1.5 high, a lone pane a cross). With minecraft-data's
+  bare shapes a bot walking over a corner of stairs fell where the server had a step (GroundSpoof,
+  then a setback loop).
+
 After this every course (walk, around, tunnel, stairs, drop, parkour, bridge, pillar, digdown,
 door, swim, ladder, nopath, follow, far) runs without a single Grim violation on Paper 1.8.8 and
 1.21.4. So does flight (`bench/live-features.ts --grim --only fly`: survival flight granted by a

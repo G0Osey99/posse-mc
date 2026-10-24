@@ -574,13 +574,15 @@ export function installInventory(bot: PosseBot): InventoryApi {
     // bucket, a pearl or a rod is used at once.
     bot.usingHeldItem = usedOverTime(offHand ? bot.inventory.slots[45] : bot.heldItem);
     if (sf('useItemWithBlockPlace')) {
+      // The vanilla 1.8 client sends a use in the air at (-1, -1, -1) with the cursor at 0 (Grim's
+      // BadPacketsU; y 255 was 1.7's).
       client.write('block_place', {
-        location: new Vec3(-1, 255, -1),
+        location: new Vec3(-1, -1, -1),
         direction: -1,
         heldItem: Item.toNotch(bot.heldItem),
-        cursorX: -1,
-        cursorY: -1,
-        cursorZ: -1,
+        cursorX: 0,
+        cursorY: 0,
+        cursorZ: 0,
       });
     } else {
       client.write('use_item', {
