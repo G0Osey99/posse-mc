@@ -336,6 +336,11 @@ bot's packets differed from the game's. Each is now done the game's way:
 - **Using an item (0.6.2).** `use_item` (1.21+) carries the rotation the movement packets carry,
   exactly (Grim's BadPacketsJ compares them bit for bit). Only items used over time (food, potions,
   bows, shields, tridents…) slow the bot while held up; a bucket, a pearl or a rod is used at once.
+- **Eating after equipping (0.6.3).** Grim stops an item use when the server's update of the held
+  item is acknowledged (`reset-item-usage-on-item-update`, on by default; it runs when the client
+  answers the transaction after the `set_slot`). Eating straight after equipping was cancelled two
+  ticks in and timed out (seen on 1.8: AutoEat). `consume` waits for that answer and a tick
+  (`ItemUseGate`; 150 ms on servers without transactions, at most a second).
 - **Inventory clicks (0.6.2).** The game takes no movement keys while the inventory screen is open:
   before clicking in its own inventory (moving an item to the hotbar), the bot's keys count as let
   go until the server has had two ticks without them (`bot.holdInput()`; Grim's MultiActionsC).

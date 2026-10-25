@@ -16,6 +16,41 @@ const DIG_CLICK_TIMEOUT = 500;
 /** Ticks the longest consumable takes (honey bottles: 40; food: 32), plus slack for latency. */
 const CONSUME_TICKS = 40;
 const CONSUME_SLACK_MS = 1500;
+/** After an inventory update: the answer to the server's next transaction, then this long (a tick for the anticheat's reset). */
+const USE_AFTER_ANSWER_MS = 100;
+/** Without transactions (no anticheat): a few ticks. */
+const USE_AFTER_UPDATE_MS = 150;
+const USE_SETTLE_MAX_MS = 1000;
+
+/**
+ * When an item may be used after the server updated the inventory: once a transaction (or 1.17+
+ * ping) that came after the update has been answered, plus USE_AFTER_ANSWER_MS; on a server that
+ * sends none, USE_AFTER_UPDATE_MS after it; never later than USE_SETTLE_MAX_MS after it.
+ */
+export class ItemUseGate {
+  private updatedAt = -Infinity;
+  private answeredAt = -Infinity;
+  private seenTransactions = false;
+
+  constructor(private readonly now: () => number = Date.now) {}
+
+  inventoryUpdated(): void {
+    this.updatedAt = this.now();
+  }
+
+  /** A transaction or ping from the server (Posse answers each at once). */
+  transaction(): void {
+    this.seenTransactions = true;
+    if (this.answeredAt < this.updatedAt) this.answeredAt = this.now();
+  }
+
+  ready(): boolean {
+    const now = this.now();
+    if (now >= this.updatedAt + USE_SETTLE_MAX_MS) return true;
+    if (!this.seenTransactions) return now >= this.updatedAt + USE_AFTER_UPDATE_MS;
+    return this.answeredAt >= this.updatedAt && now >= this.answeredAt + USE_AFTER_ANSWER_MS;
+  }
+}
 /** Items that can be used with a full hunger bar. */
 const ALWAYS_CONSUMABLES = new Set(['potion', 'milk_bucket', 'enchanted_golden_apple', 'golden_apple', 'chorus_fruit', 'honey_bottle', 'ominous_bottle']);
 
@@ -228,6 +263,25 @@ export function installInventory(bot: PosseBot): InventoryApi {
     bufferedItems = null;
     lastClosedWindow = null;
   });
+
+  // ── Item use after an inventory update ──
+  // Anticheats stop an item use when the server's update of the held item reaches the client:
+  // Grim's reset-item-usage-on-item-update runs once the client answers the transaction after a
+  // set_slot/window_items, so eating straight after equipping (its set_slot still unanswered) was
+  // cancelled two ticks in and timed out. The game's player never uses an item that fast: a use
+  // waits for that answer (and a tick for the reset), or a few ticks on servers without them.
+  const useGate = new ItemUseGate();
+  const noteInventoryUpdate = (): void => useGate.inventoryUpdated();
+  const noteTransaction = (): void => useGate.transaction();
+  client.on('set_slot', noteInventoryUpdate);
+  client.on('window_items', noteInventoryUpdate);
+  client.on('set_player_inventory', noteInventoryUpdate);
+  client.on('transaction', noteTransaction);
+  client.on('ping', noteTransaction);
+  /** Resolves once the last inventory update is safe to use an item after. */
+  const handSettled = async (): Promise<void> => {
+    while (!useGate.ready()) await new Promise((r) => setTimeout(r, 10));
+  };
 
   client.on('set_slot', (packet: any) => {
     const window = windowFor(packet.windowId);
@@ -612,6 +666,8 @@ export function installInventory(bot: PosseBot): InventoryApi {
     const held = bot.heldItem;
     if (!held) throw new Error('Nothing to consume');
     if (bot.game.gameMode !== 'creative' && !ALWAYS_CONSUMABLES.has(held.name) && bot.food >= 20) throw new Error('Food is full');
+    await handSettled();
+    if (bot.heldItem?.type !== held.type) throw new Error('The held item changed');
     const self = bot.entity.id;
     await new Promise<void>((resolve, reject) => {
       const done = (err?: Error): void => {

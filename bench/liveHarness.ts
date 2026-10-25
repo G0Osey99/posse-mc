@@ -4,6 +4,8 @@
 //   tsx bench/live-features.ts --accept-eula [--versions 1.21.4,1.12.2] [--dir ./.vanilla] [--only dig,place]
 //
 // --accept-eula means you accept the Minecraft EULA (https://aka.ms/MinecraftEULA).
+// POSSE_TRACE_ALL=1 logs every packet sent and the item/status packets received; POSSE_PAPER_ONLY=1
+// with --grim runs Paper without the GrimAC plugin (to tell Paper's behaviour from Grim's).
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { Vec3 } from 'vec3';
@@ -119,6 +121,22 @@ export async function connect(server: VanillaServer, username: string, extra: Re
       write(name, p);
     };
   }
+  if (process.env.POSSE_TRACE_ALL) {
+    // Every packet sent, and the item and status packets received (POSSE_TRACE_ALL=1).
+    const c = bot._client as any;
+    const write = c.write.bind(c);
+    const short = (p: any): string => JSON.stringify(p, (_k, v) => (typeof v === 'bigint' ? String(v) : v))?.slice(0, 140) ?? '';
+    c.write = (name: string, p: any) => {
+      if (!/^(keep_alive|ping|pong|tick_end|position|position_look|look|flying)$/.test(name)) console.log(`  > ${Date.now() % 100000} ${name} ${short(p)}`);
+      write(name, p);
+    };
+    for (const name of ['entity_status', 'set_slot', 'window_items', 'held_item_slot', 'entity_metadata', 'update_health', 'set_cooldown']) {
+      c.on(name, (p: any) => {
+        if ((name === 'entity_status' || name === 'entity_metadata') && p.entityId !== bot.entity?.id) return;
+        console.log(`  < ${Date.now() % 100000} ${name} ${short(p)}`);
+      });
+    }
+  }
   if (process.env.POSSE_TRACE_PLACE) {
     const c = bot._client as any;
     const write = c.write.bind(c);
@@ -167,10 +185,10 @@ export async function runScenarios(
   if (options.grim) {
     const [paper, grim, flight] = await Promise.all([paperJar(version, options.dir), grimJar(version, options.dir), flightPluginJar(options.dir)]);
     console.log(`  ${path.basename(paper)} + GrimAC ${grim.version}`);
-    server = await startVanilla({ ...base, jar: paper, plugins: [grim.file, flight], name: `paper-grim-${version}` });
+    server = await startVanilla({ ...base, jar: paper, plugins: process.env.POSSE_PAPER_ONLY ? [flight] : [grim.file, flight], name: process.env.POSSE_PAPER_ONLY ? `paper-only-${version}` : `paper-grim-${version}` });
     // Every violation, not just the ones past the alert threshold.
     const config = path.join(options.dir, 'servers', `paper-grim-${version}`, 'plugins', 'GrimAC', 'config.yml');
-    await writeFile(config, (await readFile(config, 'utf8')).replace(/verbose:\n(\s+)print-to-console: false/, 'verbose:\n$1print-to-console: true'));
+    if (!process.env.POSSE_PAPER_ONLY) await writeFile(config, (await readFile(config, 'utf8')).replace(/verbose:\n(\s+)print-to-console: false/, 'verbose:\n$1print-to-console: true'));
     await server.run('grim reload', /reload/i, 15_000).catch(() => undefined);
   } else {
     server = await startVanilla(base);
