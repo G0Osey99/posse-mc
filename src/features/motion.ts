@@ -13,18 +13,57 @@ import { abilitiesPacket, defaultAbilities, parseAbilities, sameAbilities, simul
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- protocol packets and prismarine-physics are untyped */
 
+/** The game's sine table (`Mth.sin`): 65536 steps a turn, in floats. */
+const SIN_TABLE = Float32Array.from({ length: 65536 }, (_, i) => Math.sin((i * Math.PI * 2) / 65536));
+const RAD_TO_INDEX = Math.fround(10430.378);
+
+/** `Mth.sin` / `Mth.cos`: the game's movement turns with these, not the exact functions. */
+export const gameSin = (rad: number): number => SIN_TABLE[Math.trunc(Math.fround(Math.fround(rad) * RAD_TO_INDEX)) & 65535]!;
+export const gameCos = (rad: number): number => SIN_TABLE[Math.trunc(Math.fround(Math.fround(rad) * RAD_TO_INDEX + 16384)) & 65535]!;
+
 /**
- * prismarine-physics for a version, with the game's own values where it differs: before 1.9 the
- * game zeroes velocities under 0.005 (not 0.003), which an anticheat's simulation (Grim) notices.
+ * prismarine-physics for a version, with the game's own values where it differs (anticheats replay
+ * the movement exactly: Grim's Simulation notices):
+ * - before 1.9 the game zeroes velocities under 0.005 (not 0.003);
+ * - from 1.21.5 a player's horizontal velocity is zeroed only when its length² is under 9e-6 (not
+ *   each axis under 0.003);
+ * - every sine and cosine is the game's table (walking direction, the sprint-jump boost, the view
+ *   vector): the exact ones drift by up to 1e-5 a tick, which tips a velocity near 0.003 the other
+ *   way and the next tick's move with it.
  */
 export function createPhysics(Physics: (registry: unknown, world: unknown) => any, registry: any): any {
   const physics = Physics(registry, { getBlock: () => null });
   if (registry.version?.['<']?.('1.9')) physics.negligeableVelocity = 0.005;
+  const horizontalLength = Boolean(registry.version?.['>=']?.('1.21.5'));
+  const simulatePlayer = physics.simulatePlayer.bind(physics);
+  physics.simulatePlayer = (state: any, world: unknown) => {
+    const { sin, cos } = Math;
+    const negligible = physics.negligeableVelocity;
+    Math.sin = gameSin;
+    Math.cos = gameCos;
+    try {
+      if (horizontalLength) {
+        const v = state.vel;
+        if (v.x * v.x + v.z * v.z < 9e-6) {
+          v.x = 0;
+          v.z = 0;
+        }
+        if (Math.abs(v.y) < negligible) v.y = 0;
+        physics.negligeableVelocity = 0;
+      }
+      return simulatePlayer(state, world);
+    } finally {
+      Math.sin = sin;
+      Math.cos = cos;
+      physics.negligeableVelocity = negligible;
+    }
+  };
   return physics;
 }
 
 const PI = Math.PI;
 const PI_2 = Math.PI * 2;
+const DEG_TO_RAD_F = Math.fround(Math.PI / 180);
 /** Ticks the bot must be on the ground and still before physics stops. */
 const SETTLE_TICKS = 10;
 /** Ticks of physics after a teleport before giving up on settling (e.g. the chunk never arrives). */
@@ -360,6 +399,15 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
     return Math.abs(v.x) > 1e-4 || Math.abs(v.z) > 1e-4 || (!bot.entity.onGround && Math.abs(v.y) > 1e-4);
   };
 
+  /** A physics state moving with the rotation this tick's packet carries. */
+  const withSentLook = <T extends { yaw: number; pitch: number }>(state: T): T => {
+    // Not wrapped: prismarine turns with sin(π − yaw), and the game's table index comes from the
+    // packet's own (unwrapped) yaw × (float)(π/180).
+    state.yaw = PI - Math.fround(sendLookNow.yaw * DEG_TO_RAD_F);
+    state.pitch = conv.fromNotchianPitch(sendLookNow.pitch);
+    return state;
+  };
+
   const simulate = (): void => {
     if (bot.blockAt(bot.entity.position) === null) {
       // Chunk not here yet; still counts towards giving up on settling.
@@ -371,17 +419,23 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
     entity.attributes ??= {};
     if (abilities.flying) {
       // The flying acceleration reads the sprint state of this tick; the keys are the ones held now.
-      const state = new PlayerState(bot, { ...input(), sprint: sprinting });
+      const state = withSentLook(new PlayerState(bot, { ...input(), sprint: sprinting }));
       simulateFlying(physics, state, world, abilities.flySpeed, { sprinting, sneakSlows: !crouchPose, takeoff });
       state.apply(bot);
       takeoff = false;
       // Like the game, landing ends the flight. The server hears it after the landing movement: an
       // anticheat that trusts flying movement (Grim) otherwise checks the landing as a walk that
       // started at the flight's speed, and flags it.
-      if (bot.entity.onGround) setOwnFlight(false, true);
+      if (bot.entity.onGround) {
+        setOwnFlight(false, true);
+        // Grim starts the tick after a landing with no vertical velocity (the flight's d × 0.6 is
+        // what a flying tick keeps; landing ends it): with it, a landing on a block's edge that
+        // slides off it the next tick dropped 0.031 where Grim expected none (Simulation).
+        bot.entity.velocity.y = 0;
+      }
     } else {
       const sprint = airSprintLags && !bot.entity.onGround ? airSprint : sprinting;
-      const state = new PlayerState(bot, { ...input(), sprint, sneak: crouchPose ? crouching : controls.sneak });
+      const state = withSentLook(new PlayerState(bot, { ...input(), sprint, sneak: crouchPose ? crouching : controls.sneak }));
       physics.simulatePlayer(state, world).apply(bot);
     }
     api.physicsTicks++;
@@ -405,13 +459,17 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
     }
   };
 
-  const updatePosition = (now: number): void => {
-    if (bot.isAlive) deadTicks = 0;
-    else if (deadTicks <= 20) deadTicks++;
-    if (deadTicks >= 20) return; // only 20 ticks of updates after death
-    const entity = bot.entity;
-    if (!finite(entity.position)) return;
+  /** This tick's rotation as the packets carry it (degrees, float) — the one the move uses too. */
+  const sendLookNow = { yaw: 0, pitch: 0 };
 
+  /**
+   * Turns the sent look towards the bot's look (at the game's turning speed) before the tick's
+   * movement: the game turns, then moves with that rotation, and anticheats replay the movement
+   * with the rotation in the packet (Grim's Simulation flagged walking that turned while the
+   * physics used the look being turned to).
+   */
+  const advanceLook = (): void => {
+    const entity = bot.entity;
     const dYaw = deltaYaw(entity.yaw, lastSentYaw);
     const dPitch = entity.pitch - lastSentPitch;
     const maxYaw = (TICK_MS / 1000) * physics.yawSpeed;
@@ -422,9 +480,18 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
       pendingLook.resolve();
       pendingLook = null;
     }
+    sendLookNow.yaw = Math.fround(conv.toNotchianYaw(lastSentYaw));
+    sendLookNow.pitch = Math.fround(conv.toNotchianPitch(lastSentPitch));
+  };
 
-    const yaw = Math.fround(conv.toNotchianYaw(lastSentYaw));
-    const pitch = Math.fround(conv.toNotchianPitch(lastSentPitch));
+  const updatePosition = (now: number): void => {
+    if (bot.isAlive) deadTicks = 0;
+    else if (deadTicks <= 20) deadTicks++;
+    if (deadTicks >= 20) return; // only 20 ticks of updates after death
+    const entity = bot.entity;
+    if (!finite(entity.position)) return;
+
+    const { yaw, pitch } = sendLookNow;
     const p = entity.position;
     const onGround = entity.onGround;
     const moved = lastSent.x !== p.x || lastSent.y !== p.y || lastSent.z !== p.z ||
@@ -466,6 +533,7 @@ export function installMotion(bot: PosseBot, physicsAllowed: boolean): MotionApi
       flushTickQueue();
       if (flightRequests.length > 0) applyFlightRequests();
       updateSprint();
+      if (bot.entity.position && finite(bot.entity.position)) advanceLook();
       if (needsPhysics()) simulate();
       takeoff = false;
       crouching = controls.sneak && !abilities.flying;

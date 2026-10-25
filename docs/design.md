@@ -223,7 +223,10 @@ Grim does not simulate flying ticks (it takes the movement as given and starts t
 tick from it), so the risk is at the changes. Taking off and stopping in the air (even while
 rising) pass as the game sends them. The landing is told after the landing movement, at the start
 of the next tick: told before it, Grim checks the landing as a walk from the flight's speed and
-flags it (Simulation, ~0.1). Other entities' `onGround` is kept from their movement packets, so a
+flags it (Simulation, ~0.1). The walk after a landing starts with no vertical velocity (0.6.3), as
+Grim's does: with the flight's leftover (its d × 0.6), a landing on a block's edge that slid off it
+in the same tick (the game moves vertically first) dropped 0.031 the next tick where Grim expected
+none. Other entities' `onGround` is kept from their movement packets, so a
 watcher can tell a flying player from a walking one.
 
 ## Pathfinding (0.3)
@@ -306,6 +309,11 @@ bot's packets differed from the game's. Each is now done the game's way:
   after it has gone out (Grim's RotationPlace checks the rotation after the click before 1.9).
 - **Continuous yaw.** The sent yaw never jumps by 360° (forced looks and teleports continue from
   the last sent value; Grim's AimModulo360).
+- **Turning, then moving (0.6.3).** A look turns the sent rotation at the game's speed over a few
+  ticks; each tick's movement uses the rotation that tick's packet carries (the game turns, then
+  moves), not the look being turned to. Moving with the target look while walking and turning was
+  flagged by Grim's Simulation (the push of that tick in the wrong direction, then fading by the
+  ground friction).
 - **Standing still.** A resting bot keeps the game's downward velocity (about −0.078/tick) instead
   of zero; zeroing it made the first tick after every stop miss the ground (GroundSpoof, then a
   Simulation offset fading by the ground friction 0.546 a tick).
@@ -316,6 +324,12 @@ bot's packets differed from the game's. Each is now done the game's way:
 - **Eye height.** Lower while sneaking (1.27 from 1.14, 1.54 before): looks and ray casts aim from
   the real eyes.
 - **1.8 physics.** Velocities under 0.005 are zeroed before 1.9 (prismarine-physics uses 0.003).
+- **The game's sine (0.6.3).** prismarine-physics runs with the game's 65536-step sine table
+  (`Mth.sin`, `gameSin`/`gameCos`) and the packet's unwrapped yaw × (float)(π/180): with the exact
+  functions the walking direction drifted by up to 1e-5 a tick — harmless alone, but it tipped a
+  velocity near the 0.003 cut-off to the other side of it, and the next moves differed by 0.003
+  (Grim's Simulation, walking while turning). From 1.21.5 a player's horizontal velocity is zeroed
+  when its length² is under 9e-6, not per axis.
 - **Bridging.** The bot stops past the edge of its block before clicking the side under it, so the
   eyes are beyond the clicked face (Grim's PositionPlace) and the near-vertical look still hits it.
 
